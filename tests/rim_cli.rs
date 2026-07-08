@@ -1483,6 +1483,8 @@ fn scan_json_reports_pnpm_high_risk() {
         .expect("rim scan json");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.trim_start().starts_with('{'), "stdout: {stdout}");
+    assert!(stdout.contains("\"candidates\""), "stdout: {stdout}");
     assert!(stdout.contains("\"manager\":\"pnpm\""), "stdout: {stdout}");
     assert!(stdout.contains("\"risk\":\"high\""), "stdout: {stdout}");
     assert!(stdout.contains("\"action\":\"skip\""), "stdout: {stdout}");
@@ -1759,4 +1761,207 @@ fn diff_backup_saves_delta_and_restore_replays_changed_and_added_files() {
         .expect("backup show");
     assert!(show.status.success());
     assert!(String::from_utf8_lossy(&show.stdout).contains("changed:"));
+}
+
+#[test]
+fn scan_diff_detects_manual_difference_without_adopting() {
+    let project = unique_temp("scan-diff-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "patched\n").expect("changed");
+
+    let fake_bin = unique_temp("bin");
+    let fake_bun = fake_bin.join("bun");
+    fs::write(
+        &fake_bun,
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p node_modules/pkg\nprintf baseline\\n > node_modules/pkg/index.js\nprintf lock > bun.lock\n",
+    )
+    .expect("fake bun");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_bun)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .args(["scan", project.to_str().unwrap(), "--diff"])
+        .env("RIM_BASE", &base)
+        .env("PATH", path)
+        .current_dir(&project)
+        .output()
+        .expect("scan diff");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("manual_diff: detected"), "stdout: {stdout}");
+    assert!(stdout.contains("changed=1"), "stdout: {stdout}");
+    assert!(
+        project.join("node_modules").is_dir(),
+        "scan --diff should not adopt"
+    );
+}
+
+#[test]
+fn scan_json_diff_outputs_diff_in_stdout_json_only() {
+    let project = unique_temp("scan-json-diff-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "patched\n").expect("changed");
+
+    let fake_bin = unique_temp("bin");
+    let fake_bun = fake_bin.join("bun");
+    fs::write(
+        &fake_bun,
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p node_modules/pkg\nprintf baseline\\n > node_modules/pkg/index.js\nprintf lock > bun.lock\n",
+    )
+    .expect("fake bun");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_bun)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .args(["scan", "--json", "--diff", project.to_str().unwrap()])
+        .env("RIM_BASE", &base)
+        .env("PATH", path)
+        .current_dir(&project)
+        .output()
+        .expect("scan json diff");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).trim().is_empty(),
+        "stderr should be empty for JSON: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.trim_start().starts_with('{'), "stdout: {stdout}");
+    assert!(
+        stdout.contains("\"manual_diff\": \"detected\""),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("\"diff\""), "stdout: {stdout}");
+}
+
+#[test]
+fn adopt_diff_backup_dry_run_does_not_create_backup_or_scratch() {
+    let project = unique_temp("adopt-diff-dry-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "patched\n").expect("dep");
+
+    let out = Command::new(bin())
+        .args([
+            "adopt",
+            project.to_str().unwrap(),
+            "--diff-backup",
+            "--dry-run",
+        ])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("adopt diff-backup dry-run");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("diff_backup: would compare"),
+        "stdout: {stdout}"
+    );
+    assert!(project.join("node_modules").is_dir());
+    assert!(
+        !project.join(".rim-backups").exists(),
+        "dry-run should not create backups"
+    );
+    assert!(
+        fs::read_dir(&base).expect("base dir").next().is_none(),
+        "dry-run should not create scratch/layer dirs under RIM_BASE"
+    );
+}
+
+#[test]
+fn backup_restore_apply_deletes_removes_deleted_entries_only_when_requested() {
+    let project = unique_temp("backup-delete-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/remove.js"), "remove\n").expect("remove file");
+    let backup = project.join(".rim-backups/node_modules-delta-1");
+    fs::create_dir_all(&backup).expect("backup");
+    fs::write(backup.join("summary.txt"), "deleted: 1\n").expect("summary");
+    fs::write(
+        backup.join("deleted.json"),
+        "[\"node_modules/pkg/remove.js\"]\n",
+    )
+    .expect("deleted");
+
+    let dry = Command::new(bin())
+        .args([
+            "backup",
+            "restore",
+            "latest",
+            "--dry-run",
+            "--apply-deletes",
+        ])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("restore dry apply deletes");
+    assert!(dry.status.success());
+    assert!(
+        project.join("node_modules/pkg/remove.js").exists(),
+        "dry-run should not delete"
+    );
+
+    let no_delete = Command::new(bin())
+        .args(["backup", "restore", "latest"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("restore no deletes");
+    assert!(no_delete.status.success());
+    assert!(
+        project.join("node_modules/pkg/remove.js").exists(),
+        "default restore should not delete"
+    );
+
+    let delete = Command::new(bin())
+        .args(["backup", "restore", "latest", "--apply-deletes"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("restore apply deletes");
+    assert!(delete.status.success());
+    assert!(
+        !project.join("node_modules/pkg/remove.js").exists(),
+        "--apply-deletes should delete"
+    );
 }

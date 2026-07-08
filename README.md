@@ -336,6 +336,7 @@ After successful npm/bun install-like commands, `rim` trims the package-manager 
 rim scan ~/code
 rim scan ~/code ~/Downloads
 rim scan --json ~/code
+rim scan --json --diff ~/code/single-project
 ```
 
 It skips obvious junk directories such as `.git`, `.rim-backups`, `target`, `dist`, `build`, and it does not recurse inside `node_modules`. Each candidate reports the project path, size, inferred manager, risk, action, and warnings:
@@ -386,6 +387,8 @@ rim adopt ~/code/app --diff-backup
 
 The comparison is not a proof of manual edits. Lifecycle scripts, native packages, generated files, and lockfile-free projects can create differences that are not hand patches. It is still much safer than blindly moving a hand-modified `node_modules` into tmpfs.
 
+`rim adopt --diff-backup --dry-run` stays strict: it does not create scratch directories or backups. Use `rim scan --diff <project>` when you want to run the fresh-install comparison without adopting.
+
 Restore delta files later with:
 
 ```bash
@@ -397,7 +400,7 @@ rim backup restore latest
 
 Restore applies `changed/`, `added/`, and `binary/` files. `deleted.json` is shown but not applied unless `--apply-deletes` is passed.
 
-`rim scan --diff <project>` can run the fresh-install comparison without adopting. For now it requires exactly one unmanaged candidate.
+`rim scan --diff <project>` can run the fresh-install comparison without adopting. For now it requires exactly one unmanaged candidate. With `--json`, stdout is a single JSON object with a `candidates` array plus `manual_diff` and `diff` fields when diffing is enabled.
 
 ## Layer inventory and garbage collection
 
@@ -606,14 +609,18 @@ Current suite:
 - install-like commands warn when `RIM_BASE` is low on space
 - install-like commands with `--auto-clean` warn that dependencies will be removed while manifest changes remain
 - `rim scan` detects unmanaged `node_modules` candidates and classifies risk/action
-- `rim scan --json` emits script-readable candidate data
+- `rim scan --json` emits a script-readable JSON object with a `candidates` array
+- `rim scan --json --diff` keeps diff result data in stdout JSON and avoids stderr noise
+- `rim scan --diff` detects manual differences without adopting
 - rim-managed `node_modules` symlinks are reported as managed/skip candidates
 - `rim adopt --dry-run` makes no project changes
 - `rim adopt` moves a real `node_modules` into a rim layer and leaves a symlink
 - high-risk adopt is refused unless `--allow-risk` is passed
 - `rim adopt --diff-backup` saves changed/added/binary deltas under `.rim-backups`
+- `rim adopt --diff-backup --dry-run` creates no scratch dirs, backups, or project changes
 - `rim backup list/show/restore` manages delta backups
 - backup restore dry-runs without writing and restores changed/added/binary files by default
+- `rim backup restore --apply-deletes` is required before deleted entries are removed
 - `.rim-meta.json` powers `rim ls` and metadata-based `rim gc`
 - `.rim-meta.json` stores manifest hash and pinned state
 - `rim pin` / `rim unpin` toggle GC protection

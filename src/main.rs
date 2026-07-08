@@ -1166,11 +1166,12 @@ fn print_scan_table(candidates: &[ScanCandidate]) {
 }
 
 fn print_scan_json(candidates: &[ScanCandidate], diff: Option<&DiffCounts>) {
-    println!("[");
+    println!("{{");
+    println!("  \"candidates\": [");
     for (idx, candidate) in candidates.iter().enumerate() {
         let comma = if idx + 1 == candidates.len() { "" } else { "," };
         println!(
-            "  {{\"project\":\"{}\",\"node_modules\":\"{}\",\"size_bytes\":{},\"manager\":\"{}\",\"risk\":\"{}\",\"action\":\"{}\",\"managed\":{},\"warnings\":[{}]}}{}",
+            "    {{\"project\":\"{}\",\"node_modules\":\"{}\",\"size_bytes\":{},\"manager\":\"{}\",\"risk\":\"{}\",\"action\":\"{}\",\"managed\":{},\"warnings\":[{}]}}{}",
             json_escape(&candidate.project_root.to_string_lossy()),
             json_escape(&candidate.node_modules.to_string_lossy()),
             candidate.size_bytes,
@@ -1187,17 +1188,19 @@ fn print_scan_json(candidates: &[ScanCandidate], diff: Option<&DiffCounts>) {
             comma
         );
     }
-    println!("]");
+    println!("  ]{}", if diff.is_some() { "," } else { "" });
     if let Some(diff) = diff {
-        eprintln!(
-            "manual_diff={}",
+        println!(
+            "  \"manual_diff\": \"{}\",",
             if diff.has_changes() {
                 "detected"
             } else {
                 "none"
             }
         );
+        println!("  \"diff\": {}", diff.to_json());
     }
+    println!("}}");
 }
 
 fn adopt_command(
@@ -1244,6 +1247,10 @@ fn adopt_command(
         );
     }
     if dry_run {
+        if diff_backup {
+            println!("diff_backup: would compare existing node_modules with a fresh install");
+            println!("diff_backup: dry-run does not create scratch files or backups");
+        }
         return Ok(0);
     }
 
@@ -1445,9 +1452,10 @@ fn diff_trees(existing: &Path, pristine: &Path, backup: &Path) -> Result<DiffCou
                 copy_backup_item(existing, rel, entry, &backup.join("changed"))?;
             }
             Some(base)
-                if entry.hash != base.hash
-                    || entry.link_target != base.link_target
-                    || entry.size != base.size =>
+                if entry.kind != "dir"
+                    && (entry.hash != base.hash
+                        || entry.link_target != base.link_target
+                        || entry.size != base.size) =>
             {
                 if entry.kind == "symlink" {
                     symlinks.push(format!(
@@ -1626,6 +1634,13 @@ fn write_backup_metadata(
 impl DiffCounts {
     fn has_changes(&self) -> bool {
         self.changed + self.added + self.deleted + self.type_changed + self.binary > 0
+    }
+
+    fn to_json(&self) -> String {
+        format!(
+            "{{\"changed\":{},\"added\":{},\"deleted\":{},\"type_changed\":{},\"binary\":{}}}",
+            self.changed, self.added, self.deleted, self.type_changed, self.binary
+        )
     }
 }
 
