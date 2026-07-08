@@ -42,8 +42,10 @@ fn help_lists_cleanup_options() {
         "rim gc",
         "rim path",
         "rim explain",
+        "rim ensure",
         "install|run|test|start",
         "RIM_PROFILE",
+        "--tmp",
         "--suggest",
         "--cache-only",
         "--deps-only",
@@ -358,6 +360,164 @@ fn deno_commands_do_not_create_project_node_modules_symlink() {
         stdout.contains("command: deno cache main.ts"),
         "stdout: {stdout}"
     );
+}
+
+#[test]
+fn ensure_installs_when_dependencies_are_missing() {
+    let project = make_project();
+    let base = unique_temp("base");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    let fake_bin = unique_temp("bin");
+    let fake_bun = fake_bin.join("bun");
+    fs::write(
+        &fake_bun,
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\n' \"$@\" >> \"$RIM_TEST_LOG\"\nmkdir -p node_modules/fake\nprintf lock > bun.lock\n",
+    )
+    .expect("fake bun");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_bun)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let log = project.join("calls.log");
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .arg("ensure")
+        .env("RIM_BASE", &base)
+        .env("PATH", path)
+        .env("RIM_TEST_LOG", &log)
+        .current_dir(&project)
+        .output()
+        .expect("rim ensure");
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("dependencies missing"), "stdout: {stdout}");
+    assert!(fs::read_to_string(&log).expect("log").contains("install"));
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    assert!(
+        link_target.join("fake").exists(),
+        "ensure should install deps"
+    );
+}
+
+#[test]
+fn ensure_skips_when_dependencies_exist() {
+    let project = make_project();
+    let base = unique_temp("base");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(prepare.status.success());
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    fs::create_dir_all(link_target.join("already-installed")).expect("dep");
+
+    let out = Command::new(bin())
+        .arg("ensure")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("rim ensure");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("already present"), "stdout: {stdout}");
+}
+
+#[test]
+fn shortcut_run_auto_installs_missing_dependencies_before_run() {
+    let project = make_project();
+    let base = unique_temp("base");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    let fake_bin = unique_temp("bin");
+    let fake_bun = fake_bin.join("bun");
+    fs::write(
+        &fake_bun,
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\n' \"$@\" >> \"$RIM_TEST_LOG\"\nif [ \"${1:-}\" = install ]; then mkdir -p node_modules/fake; printf lock > bun.lock; exit 0; fi\nif [ \"${1:-}\" = run ]; then test -d node_modules/fake; exit 7; fi\n",
+    )
+    .expect("fake bun");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_bun)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let log = project.join("calls.log");
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .args(["run", "dev"])
+        .env("RIM_BASE", &base)
+        .env("PATH", path)
+        .env("RIM_TEST_LOG", &log)
+        .current_dir(&project)
+        .output()
+        .expect("rim shortcut run dev");
+    assert_eq!(out.status.code(), Some(7));
+    let log = fs::read_to_string(log).expect("log");
+    assert!(log.contains("install"), "log: {log}");
+    assert!(log.contains("run\ndev"), "log: {log}");
+}
+
+#[test]
+fn shortcut_run_dry_run_reports_ensure_install() {
+    let project = make_project();
+    let base = unique_temp("base");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+
+    let out = Command::new(bin())
+        .args(["--dry-run", "run", "dev"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("rim shortcut run dry-run");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ensure_install: bun install"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("command: bun run dev"), "stdout: {stdout}");
+}
+
+#[test]
+fn explain_auto_detects_shortcut_command() {
+    let project = make_project();
+    let base = unique_temp("base");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+
+    let out = Command::new(bin())
+        .args(["explain", "install"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("rim explain install");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("tool: bun"), "stdout: {stdout}");
+    assert!(stdout.contains("args: install"), "stdout: {stdout}");
 }
 
 #[test]

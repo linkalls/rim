@@ -31,6 +31,7 @@ struct CliOptions {
     keep_on_error: bool,
     ephemeral: bool,
     keep_cache: bool,
+    ensure_before_run: bool,
 }
 
 impl CliOptions {
@@ -60,8 +61,13 @@ fn run() -> Result<u8, String> {
 
     let ctx = build_context()?;
     let mut command = command;
+    let mut options = options;
     if is_manager_shortcut(&command) {
+        let shortcut = command.clone();
         let manager = detect_manager(&ctx)?;
+        if matches!(shortcut.as_str(), "run" | "test" | "start") {
+            options.ensure_before_run = true;
+        }
         let mut resolved = Vec::with_capacity(args.len() + 1);
         resolved.push(OsString::from(manager));
         resolved.extend(args);
@@ -80,6 +86,10 @@ fn run() -> Result<u8, String> {
         "clean" => {
             let clean_args = args.split_off(1);
             clean_command(&ctx, &clean_args)
+        }
+        "ensure" => {
+            let ensure_args = args.split_off(1);
+            ensure_command(&ctx, &ensure_args, options)
         }
         "ls" => {
             list_layers(&ctx);
@@ -150,9 +160,10 @@ Usage:
   rim status
   rim doctor [--suggest]
   rim clean [--cache-only|--deps-only]
+  rim ensure [bun|npm|pnpm]
   rim ls
   rim gc [--dry-run] [--orphaned] [--older-than 1d] [--all]
-  rim path [--node-modules|--cache|--npm-cache|--bun-cache|--deno-cache|--shadow]
+  rim path [--node-modules|--cache|--npm-cache|--bun-cache|--deno-cache|--tmp|--shadow]
   rim install|run|test|start|add|remove|update|ci [args...]  # auto-detect manager
   rim explain <bun|npm|deno|...> [args...]
   rim [--dry-run] [--auto-clean] [--ephemeral] [--keep-on-error] [--keep-cache] <bun|npm|deno|node|...> [args...]
@@ -785,6 +796,27 @@ struct MemoryInfo {
     shmem_bytes: Option<u64>,
 }
 
+fn ensure_command(ctx: &RimContext, args: &[OsString], options: CliOptions) -> Result<u8, String> {
+    let tool = match args.first().and_then(|arg| arg.to_str()) {
+        None => detect_manager(ctx)?,
+        Some("bun" | "npm" | "pnpm" | "yarn") => args.first().and_then(|arg| arg.to_str()).unwrap(),
+        Some(other) => {
+            return Err(format!(
+                "unknown ensure manager: {other}; use bun, npm, pnpm, or omit it for auto-detect"
+            ));
+        }
+    };
+    ensure_layout_for(ctx, tool)?;
+    write_meta(ctx, tool)?;
+    if dependencies_missing(ctx) {
+        println!("rim ensure: dependencies missing; running {tool} install");
+        run_install_like(ctx, tool, options)
+    } else {
+        println!("rim ensure: dependencies already present for {tool}");
+        Ok(0)
+    }
+}
+
 fn doctor_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
     let mut suggest = false;
     for arg in args {
@@ -809,6 +841,7 @@ fn path_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
         Some("--npm-cache") => &ctx.npm_cache,
         Some("--bun-cache") => &ctx.bun_cache,
         Some("--deno-cache") => &ctx.deno_dir,
+        Some("--tmp") => &ctx.tmp,
         Some("--shadow") => &ctx.shadow_project,
         Some(other) => return Err(format!("unknown path option: {other}")),
     };
@@ -820,10 +853,18 @@ fn path_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
 }
 
 fn explain(ctx: &RimContext, args: &[OsString], options: CliOptions) -> Result<u8, String> {
-    let Some(tool) = args.first().and_then(|arg| arg.to_str()) else {
-        return Err("rim explain requires a tool, for example: rim explain bun install".to_owned());
+    let Some(first) = args.first().and_then(|arg| arg.to_str()) else {
+        return Err("rim explain requires a command, for example: rim explain bun install or rim explain install".to_owned());
     };
-    let tool_args = args[1..].to_vec();
+    let (tool, tool_args) = if is_manager_shortcut(first) {
+        let manager = detect_manager(ctx)?;
+        let mut tool_args = Vec::with_capacity(args.len());
+        tool_args.push(OsString::from(first));
+        tool_args.extend(args[1..].iter().cloned());
+        (manager, tool_args)
+    } else {
+        (first, args[1..].to_vec())
+    };
     let install_like = is_install_like(tool, &tool_args);
     let final_args = final_args(ctx, tool, tool_args);
     let cwd = if install_like {
@@ -1311,6 +1352,17 @@ fn run_tool(
         }
     }
 
+    let needs_shortcut_ensure = options.ensure_before_run
+        && !install_like
+        && should_ephemeral_install(tool, &args)
+        && (options.dry_run || dependencies_missing(ctx));
+    if needs_shortcut_ensure && !options.dry_run {
+        let install_code = run_install_like(ctx, tool, options)?;
+        if install_code != 0 {
+            return Ok(install_code);
+        }
+    }
+
     if install_like {
         sync_manifests_to_shadow(ctx)?;
     }
@@ -1334,6 +1386,9 @@ fn run_tool(
         println!("keep_cache={}", options.keep_cache);
         if needs_ephemeral_install {
             println!("ephemeral_install: {} install", tool);
+        }
+        if needs_shortcut_ensure {
+            println!("ensure_install: {} install", tool);
         }
         print_env(ctx);
         return Ok(0);

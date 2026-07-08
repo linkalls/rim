@@ -25,6 +25,7 @@ Implemented:
 - `rim path`
 - `rim explain`
 - manager shortcuts: `rim install`, `rim run dev`, `rim test`
+- `rim ensure`
 - `rim clean`
 - `rim clean --cache-only`
 - `rim clean --deps-only`
@@ -82,6 +83,14 @@ rim test
 
 Detection order is Bun first, then npm, then pnpm as experimental. If only `package.json` exists, `rim` defaults to Bun.
 
+`rim run`, `rim test`, and `rim start` also ensure dependencies first when the dependency layer is missing:
+
+```bash
+rim run dev   # auto-detect manager, install if missing, then run dev
+rim ensure    # install if missing, otherwise do nothing
+rim ensure bun
+```
+
 For Deno, `rim` mainly redirects caches and does not create a project `node_modules` symlink:
 
 ```bash
@@ -138,7 +147,7 @@ Dry-run without executing the wrapped tool:
 rim --dry-run npm install
 ```
 
-Dry-run still prepares the dependency-layer layout, `node_modules` symlink, and metadata so the printed paths/env match a real run.
+Dry-run still prepares the dependency-layer layout, `node_modules` symlink, and metadata so the printed paths/env match a real run. Shortcut run/test/start dry-runs also show `ensure_install: <manager> install` when dependencies are missing.
 
 Print script-friendly paths:
 
@@ -148,17 +157,19 @@ rim path --node-modules
 rim path --npm-cache
 rim path --bun-cache
 rim path --deno-cache
+rim path --tmp
 rim path --shadow
 ```
 
 Explain what `rim` would do for a command:
 
 ```bash
+rim explain install
 rim explain bun install
 rim explain bun run dev
 ```
 
-`rim explain` does not create or remove anything; it only describes the plan.
+`rim explain` does not create or remove anything; it only describes the plan. It also accepts shortcuts such as `rim explain install` and resolves the manager using the same auto-detection rules.
 
 ## Auto-clean and ephemeral mode
 
@@ -236,6 +247,8 @@ Deno commands are special: `rim deno ...` creates only the dependency-layer meta
 For install-like commands (`install`, `i`, `add`, `remove`, `rm`, `update`, `up`, `ci`), `rim` runs the package manager inside the RAM shadow project. This matters because `npm install` may replace a pre-existing `node_modules` symlink if it is run directly in the source project.
 
 For non-install commands (`run dev`, `test`, etc.), `rim` runs from the real project so relative source paths behave normally.
+
+`rim ensure` is the reusable dependency check: it prepares the layer, installs when `node_modules` is missing or empty, and otherwise exits without running the package manager. Shortcut commands (`rim run`, `rim test`, `rim start`) use the same check before running.
 
 ## Environment
 
@@ -354,7 +367,7 @@ suggestions:
   - lifecycle scripts detected; postinstall/prepare hooks may assume real project cwd.
 ```
 
-`rim explain` is a dry educational view of a wrapped command. Shortcuts like `rim install` / `rim run dev` are for real execution; `rim explain` expects the explicit tool name:
+`rim explain` is a dry educational view of a wrapped command. It accepts either explicit tools or shortcuts such as `rim explain install`:
 
 ```txt
 tool: bun
@@ -481,6 +494,8 @@ Current suite:
 - `rim gc --orphaned` removes orphaned layers
 - `rim path` prints script-friendly dependency-layer paths
 - `rim install` / `rim run dev` auto-detect Bun or npm from project files
+- `rim ensure` installs missing dependencies and skips when dependencies already exist
+- shortcut `rim run` / `rim test` / `rim start` ensure dependencies before running
 - `RIM_PROFILE=cache` maps to `$HOME/.cache/rim` when `RIM_BASE` is unset
 - Deno commands do not create a project `node_modules` symlink
 - `.rim-meta.json` is updated with an atomic write+rename
