@@ -184,7 +184,7 @@ Usage:
   rim status
   rim doctor [--suggest]
   rim clean [--cache-only|--deps-only] [--force]
-  rim scan [--json|--diff] <path>...
+  rim scan [--json|--diff] [--max-depth N] <path>...
   rim adopt <project> [--dry-run] [--allow-risk] [--diff-backup] [--copy]
   rim backup list|show|restore <id|latest> [--dry-run] [--apply-deletes]
   rim repair --stale-locks|--broken-links [--dry-run]
@@ -1337,14 +1337,30 @@ struct DiffCounts {
 fn scan_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
     let mut json = false;
     let mut diff = false;
+    let mut max_depth = None;
     let mut paths = Vec::new();
-    for arg in args {
-        match arg.to_str() {
-            Some("--json") => json = true,
-            Some("--diff") => diff = true,
-            Some(path) => paths.push(expand_tilde(path)),
-            None => return Err("scan arguments must be valid UTF-8".to_owned()),
+    let mut i = 0;
+    while i < args.len() {
+        let Some(arg) = args[i].to_str() else {
+            return Err("scan arguments must be valid UTF-8".to_owned());
+        };
+        match arg {
+            "--json" => json = true,
+            "--diff" => diff = true,
+            "--max-depth" => {
+                i += 1;
+                let Some(value) = args.get(i).and_then(|arg| arg.to_str()) else {
+                    return Err("--max-depth requires a non-negative integer".to_owned());
+                };
+                max_depth = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid --max-depth value: {value}"))?,
+                );
+            }
+            path => paths.push(expand_tilde(path)),
         }
+        i += 1;
     }
     if paths.is_empty() {
         paths.push(env::current_dir().map_err(|e| format!("cannot read cwd: {e}"))?);
@@ -1352,7 +1368,7 @@ fn scan_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
 
     let mut candidates = Vec::new();
     for path in paths {
-        scan_path(ctx, &path, &mut candidates)?;
+        scan_path(ctx, &path, max_depth, &mut candidates)?;
     }
 
     if diff {
@@ -1396,14 +1412,23 @@ fn scan_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
     Ok(0)
 }
 
-fn scan_path(ctx: &RimContext, root: &Path, out: &mut Vec<ScanCandidate>) -> Result<(), String> {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+fn scan_path(
+    ctx: &RimContext,
+    root: &Path,
+    max_depth: Option<usize>,
+    out: &mut Vec<ScanCandidate>,
+) -> Result<(), String> {
+    let mut stack = vec![(root.to_path_buf(), 0_usize)];
+    while let Some((dir, depth)) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            let entry_depth = depth.saturating_add(1);
+            if max_depth.is_some_and(|max| entry_depth > max) {
+                continue;
+            }
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if name == "node_modules" {
@@ -1417,7 +1442,7 @@ fn scan_path(ctx: &RimContext, root: &Path, out: &mut Vec<ScanCandidate>) -> Res
                 continue;
             };
             if meta.is_dir() && !meta.file_type().is_symlink() {
-                stack.push(path);
+                stack.push((path, entry_depth));
             }
         }
     }

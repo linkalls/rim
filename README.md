@@ -152,6 +152,7 @@ Find unmanaged `node_modules` directories and adopt one safely:
 
 ```bash
 rim scan ~/code
+rim scan --max-depth 2 ~/code
 rim scan --json ~/code
 rim adopt ~/code/tiny-hono --dry-run
 rim adopt ~/code/tiny-hono
@@ -486,6 +487,8 @@ rim backup restore latest --apply-deletes
 
 `.rim-backups/` can contain local patches or generated files from dependencies. It is ignored by this repo's `.gitignore` and should not be committed unless you intentionally want to publish those files.
 
+`rim scan --max-depth N` limits recursive scanning below each supplied root. Depth counts path components below the root, so `--max-depth 2 ~/code` finds the common `~/code/app/node_modules` layout while skipping deeper trees. This is useful when scanning a large home directory or drive.
+
 `rim scan --diff <project>` can run the fresh-install comparison without adopting. For now it requires exactly one unmanaged candidate. With `--json`, stdout is a single JSON object with a `candidates` array plus `manual_diff` and `diff` fields when diffing is enabled. `rim scan --diff` may temporarily use as much space as a fresh install in `RIM_BASE`; for large projects, prefer `RIM_PROFILE=cache` or `RIM_PROFILE=external`.
 
 ## Layer inventory and garbage collection
@@ -630,21 +633,21 @@ Measurement: tree walk using lstat, so symlink targets are not counted as projec
 
 | Case | Dependencies | Normal persistent | rim persistent | rim RAM | RAM vs normal | RAM overhead | Saved persistent | Time normal | Time rim |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| npm/tiny-validation | `is-number`, `zod` | 7.6 MB | 5.2 KB | 4.8 MB | 63.53% | -2.8 MB | 99.93% | 1.224s | 1.399s |
-| npm/utility-client | `axios`, `dayjs`, `lodash` | 9.8 MB | 14.9 KB | 6.3 MB | 64.07% | -3.5 MB | 99.85% | 2.391s | 2.352s |
-| npm/hono-api | `@hono/node-server`, `hono`, `zod` | 16.9 MB | 5.6 KB | 7.1 MB | 41.80% | -9.9 MB | 99.97% | 1.745s | 1.935s |
-| npm/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 198.6 MB | 32.8 KB | 63.8 MB | 32.12% | -134.8 MB | 99.98% | 8.942s | 9.797s |
-| npm/next-app | `next`, `react`, `react-dom`, `typescript` | 549.7 MB | 34.0 KB | 324.6 MB | 59.06% | -225.0 MB | 99.99% | 14.866s | 14.897s |
-| bun/tiny-validation | `is-number`, `zod` | 7.4 MB | 4.7 KB | 3.5 MB | 46.50% | -4.0 MB | 99.94% | 0.244s | 0.332s |
-| bun/utility-client | `axios`, `dayjs`, `lodash` | 11.0 MB | 9.4 KB | 4.9 MB | 44.16% | -6.1 MB | 99.92% | 0.348s | 0.292s |
-| bun/hono-api | `@hono/node-server`, `hono`, `zod` | 13.7 MB | 5.0 KB | 5.7 MB | 41.42% | -8.0 MB | 99.96% | 0.309s | 0.282s |
-| bun/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 199.7 MB | 17.0 KB | 90.3 MB | 45.22% | -109.4 MB | 99.99% | 1.416s | 1.752s |
-| bun/next-app | `next`, `react`, `react-dom`, `typescript` | 953.4 MB | 17.5 KB | 463.9 MB | 48.65% | -489.5 MB | 100.00% | 7.049s | 5.808s |
-| deno/tiny-validation | `is-number`, `zod` | 4.8 MB | 4.6 KB | 4.6 MB | 94.59% | -266.7 KB | 99.91% | 0.623s | 1.237s |
-| deno/utility-client | `axios`, `dayjs`, `lodash` | 5.9 MB | 9.2 KB | 5.2 MB | 88.05% | -727.2 KB | 99.85% | 0.570s | 0.491s |
-| deno/hono-api | `@hono/node-server`, `hono`, `zod` | 10.9 MB | 4.9 KB | 9.8 MB | 89.93% | -1.1 MB | 99.96% | 0.674s | 0.553s |
-| deno/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 108.0 MB | 16.3 KB | 107.3 MB | 99.36% | -708.9 KB | 99.99% | 3.960s | 3.994s |
-| deno/next-app | `next`, `react`, `react-dom`, `typescript` | 498.4 MB | 17.1 KB | 494.7 MB | 99.26% | -3.7 MB | 100.00% | 9.303s | 9.291s |
+| npm/tiny-validation | `is-number`, `zod` | 7.6 MB | 5.2 KB | 4.8 MB | 63.53% | -2.8 MB | 99.93% | 1.317s | 1.400s |
+| npm/utility-client | `axios`, `dayjs`, `lodash` | 9.8 MB | 14.9 KB | 6.3 MB | 64.07% | -3.5 MB | 99.85% | 2.671s | 2.595s |
+| npm/hono-api | `@hono/node-server`, `hono`, `zod` | 16.9 MB | 5.6 KB | 7.1 MB | 41.80% | -9.9 MB | 99.97% | 1.834s | 1.900s |
+| npm/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 198.6 MB | 32.8 KB | 63.8 MB | 32.11% | -134.8 MB | 99.98% | 9.224s | 9.120s |
+| npm/next-app | `next`, `react`, `react-dom`, `typescript` | 549.7 MB | 34.0 KB | 324.6 MB | 59.06% | -225.0 MB | 99.99% | 15.570s | 15.055s |
+| bun/tiny-validation | `is-number`, `zod` | 7.4 MB | 4.7 KB | 3.5 MB | 46.50% | -4.0 MB | 99.94% | 0.401s | 0.241s |
+| bun/utility-client | `axios`, `dayjs`, `lodash` | 11.0 MB | 9.4 KB | 4.9 MB | 44.16% | -6.1 MB | 99.92% | 0.419s | 0.326s |
+| bun/hono-api | `@hono/node-server`, `hono`, `zod` | 13.7 MB | 5.0 KB | 5.7 MB | 41.42% | -8.0 MB | 99.96% | 0.294s | 0.298s |
+| bun/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 199.5 MB | 17.0 KB | 90.2 MB | 45.22% | -109.3 MB | 99.99% | 1.565s | 2.199s |
+| bun/next-app | `next`, `react`, `react-dom`, `typescript` | 953.4 MB | 17.5 KB | 463.9 MB | 48.65% | -489.5 MB | 100.00% | 5.858s | 6.060s |
+| deno/tiny-validation | `is-number`, `zod` | 4.8 MB | 4.6 KB | 4.6 MB | 94.59% | -266.7 KB | 99.91% | 0.851s | 0.560s |
+| deno/utility-client | `axios`, `dayjs`, `lodash` | 5.9 MB | 9.2 KB | 5.2 MB | 88.05% | -727.2 KB | 99.85% | 0.592s | 0.670s |
+| deno/hono-api | `@hono/node-server`, `hono`, `zod` | 10.9 MB | 4.9 KB | 9.8 MB | 89.93% | -1.1 MB | 99.96% | 0.605s | 0.647s |
+| deno/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 108.0 MB | 16.3 KB | 107.3 MB | 99.36% | -708.9 KB | 99.99% | 6.223s | 3.707s |
+| deno/next-app | `next`, `react`, `react-dom`, `typescript` | 498.4 MB | 17.1 KB | 494.7 MB | 99.26% | -3.7 MB | 100.00% | 9.763s | 9.083s |
 
 Latest benchmark summary output:
 
@@ -652,12 +655,12 @@ Latest benchmark summary output:
 npm/tiny-validation: persistent 7.6 MB -> 5.2 KB, rim RAM 4.8 MB (63.53% of normal, overhead -2.8 MB), saved 99.93%
 npm/utility-client: persistent 9.8 MB -> 14.9 KB, rim RAM 6.3 MB (64.07% of normal, overhead -3.5 MB), saved 99.85%
 npm/hono-api: persistent 16.9 MB -> 5.6 KB, rim RAM 7.1 MB (41.80% of normal, overhead -9.9 MB), saved 99.97%
-npm/react-vite-ts: persistent 198.6 MB -> 32.8 KB, rim RAM 63.8 MB (32.12% of normal, overhead -134.8 MB), saved 99.98%
+npm/react-vite-ts: persistent 198.6 MB -> 32.8 KB, rim RAM 63.8 MB (32.11% of normal, overhead -134.8 MB), saved 99.98%
 npm/next-app: persistent 549.7 MB -> 34.0 KB, rim RAM 324.6 MB (59.06% of normal, overhead -225.0 MB), saved 99.99%
 bun/tiny-validation: persistent 7.4 MB -> 4.7 KB, rim RAM 3.5 MB (46.50% of normal, overhead -4.0 MB), saved 99.94%
 bun/utility-client: persistent 11.0 MB -> 9.4 KB, rim RAM 4.9 MB (44.16% of normal, overhead -6.1 MB), saved 99.92%
 bun/hono-api: persistent 13.7 MB -> 5.0 KB, rim RAM 5.7 MB (41.42% of normal, overhead -8.0 MB), saved 99.96%
-bun/react-vite-ts: persistent 199.7 MB -> 17.0 KB, rim RAM 90.3 MB (45.22% of normal, overhead -109.4 MB), saved 99.99%
+bun/react-vite-ts: persistent 199.5 MB -> 17.0 KB, rim RAM 90.2 MB (45.22% of normal, overhead -109.3 MB), saved 99.99%
 bun/next-app: persistent 953.4 MB -> 17.5 KB, rim RAM 463.9 MB (48.65% of normal, overhead -489.5 MB), saved 100.00%
 deno/tiny-validation: persistent 4.8 MB -> 4.6 KB, rim RAM 4.6 MB (94.59% of normal, overhead -266.7 KB), saved 99.91%
 deno/utility-client: persistent 5.9 MB -> 9.2 KB, rim RAM 5.2 MB (88.05% of normal, overhead -727.2 KB), saved 99.85%
@@ -700,6 +703,7 @@ Current suite:
 - install-like commands warn when `RIM_BASE` is low on space
 - install-like commands with `--auto-clean` warn that dependencies will be removed while manifest changes remain
 - `rim scan` detects unmanaged `node_modules` candidates and classifies risk/action
+- `rim scan --max-depth` limits recursive discovery for faster large-tree scans
 - `rim scan --json` emits a script-readable JSON object with a `candidates` array
 - `rim scan --json --diff` keeps diff result data in stdout JSON and avoids stderr noise
 - `rim scan --diff` detects manual differences without adopting

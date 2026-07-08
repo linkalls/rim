@@ -2995,3 +2995,58 @@ fn gc_keep_free_one_byte_is_noop_on_normal_filesystem() {
     );
     assert!(layer.exists(), "noop should keep layer");
 }
+
+#[test]
+fn scan_max_depth_limits_descent() {
+    let root = unique_temp("scan-depth-root");
+    let base = unique_temp("base");
+    let shallow = root.join("shallow-app");
+    let deep = root.join("a/b/deep-app");
+    for project in [&shallow, &deep] {
+        fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+        fs::write(project.join("package.json"), "{}\n").expect("package");
+        fs::write(project.join("bun.lock"), "").expect("bun lock");
+    }
+
+    let limited = Command::new(bin())
+        .args(["scan", "--max-depth", "2", root.to_str().unwrap()])
+        .env("RIM_BASE", &base)
+        .current_dir(&root)
+        .output()
+        .expect("scan limited depth");
+    assert!(limited.status.success());
+    let stdout = String::from_utf8_lossy(&limited.stdout);
+    assert!(stdout.contains("shallow-app"), "stdout: {stdout}");
+    assert!(!stdout.contains("deep-app"), "stdout: {stdout}");
+
+    let full = Command::new(bin())
+        .args(["scan", root.to_str().unwrap()])
+        .env("RIM_BASE", &base)
+        .current_dir(&root)
+        .output()
+        .expect("scan full depth");
+    assert!(full.status.success());
+    let stdout = String::from_utf8_lossy(&full.stdout);
+    assert!(stdout.contains("shallow-app"), "stdout: {stdout}");
+    assert!(stdout.contains("deep-app"), "stdout: {stdout}");
+}
+
+#[test]
+fn scan_max_depth_rejects_invalid_value() {
+    let root = unique_temp("scan-depth-invalid-root");
+    let base = unique_temp("base");
+    fs::write(root.join("package.json"), "{}\n").expect("package");
+
+    let out = Command::new(bin())
+        .args(["scan", "--max-depth", "nope", root.to_str().unwrap()])
+        .env("RIM_BASE", &base)
+        .current_dir(&root)
+        .output()
+        .expect("scan invalid depth");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid --max-depth value"),
+        "stderr: {stderr}"
+    );
+}
