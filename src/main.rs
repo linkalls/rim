@@ -59,6 +59,15 @@ fn run() -> Result<u8, String> {
     };
 
     let ctx = build_context()?;
+    let mut command = command;
+    if is_manager_shortcut(&command) {
+        let manager = detect_manager(&ctx)?;
+        let mut resolved = Vec::with_capacity(args.len() + 1);
+        resolved.push(OsString::from(manager));
+        resolved.extend(args);
+        args = resolved;
+        command = manager.to_owned();
+    }
 
     match command.as_str() {
         "prepare" => {
@@ -144,6 +153,7 @@ Usage:
   rim ls
   rim gc [--dry-run] [--orphaned] [--older-than 1d] [--all]
   rim path [--node-modules|--cache|--npm-cache|--bun-cache|--deno-cache|--shadow]
+  rim install|run|test|start|add|remove|update|ci [args...]  # auto-detect manager
   rim explain <bun|npm|deno|...> [args...]
   rim [--dry-run] [--auto-clean] [--ephemeral] [--keep-on-error] [--keep-cache] <bun|npm|deno|node|...> [args...]
 
@@ -155,16 +165,31 @@ Options:
   --keep-cache     Keep npm/bun package-manager cache after successful installs
 
 Environment:
-  RIM_BASE   dependency layer base directory, default /dev/shm/rim"
+  RIM_BASE      dependency layer base directory, default /dev/shm/rim
+  RIM_PROFILE   ram|cache|external preset when RIM_BASE is unset"
     );
+}
+
+fn resolve_rim_base() -> Result<PathBuf, String> {
+    if let Some(base) = env::var_os("RIM_BASE") {
+        return Ok(PathBuf::from(base));
+    }
+    match env::var("RIM_PROFILE").ok().as_deref() {
+        None | Some("") | Some("ram") => Ok(PathBuf::from("/dev/shm/rim")),
+        Some("cache") => Ok(cache_dir().join("rim")),
+        Some("external") => Ok(env::var_os("RIM_EXTERNAL_BASE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/mnt/external/rim"))),
+        Some(other) => Err(format!(
+            "unknown RIM_PROFILE={other}; expected ram, cache, or external"
+        )),
+    }
 }
 
 fn build_context() -> Result<RimContext, String> {
     let cwd = env::current_dir().map_err(|e| format!("cannot read cwd: {e}"))?;
     let project_root = find_project_root(&cwd);
-    let base = env::var_os("RIM_BASE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/dev/shm/rim"));
+    let base = resolve_rim_base()?;
     let name = project_root
         .file_name()
         .and_then(|s| s.to_str())
@@ -223,6 +248,19 @@ fn short_hash(path: &Path) -> String {
 }
 
 fn ensure_layout(ctx: &RimContext) -> Result<(), String> {
+    ensure_node_layout(ctx)
+}
+
+fn ensure_layout_for(ctx: &RimContext, tool: &str) -> Result<(), String> {
+    if tool == "deno" {
+        fs::create_dir_all(&ctx.rim_dir)
+            .map_err(|e| format!("cannot create {}: {e}", ctx.rim_dir.display()))?;
+        return Ok(());
+    }
+    ensure_node_layout(ctx)
+}
+
+fn ensure_node_layout(ctx: &RimContext) -> Result<(), String> {
     // Keep the base layout minimal. Tool-specific cache directories are created
     // lazily by the wrapped package manager only when it actually uses them.
     for dir in [&ctx.rim_dir, &ctx.shadow_project, &ctx.node_modules] {
@@ -315,7 +353,7 @@ fn ensure_node_modules_link(ctx: &RimContext) -> Result<(), String> {
             Ok(())
         }
         Ok(_) => Err(
-            "node_modules exists and is not a symlink; move or delete it before using rim"
+            "node_modules exists and is not a symlink. Try: mv node_modules node_modules.backup && rim install"
                 .to_owned(),
         ),
         Err(e) if e.kind() == io::ErrorKind::NotFound => symlink(&ctx.node_modules, &link)
@@ -451,8 +489,10 @@ fn write_meta(ctx: &RimContext, manager: &str) -> Result<(), String> {
         json_escape(&rim_mode(ctx)),
         json_escape(env!("CARGO_PKG_VERSION"))
     );
-    fs::write(ctx.rim_dir.join(".rim-meta.json"), contents)
-        .map_err(|e| format!("cannot write rim metadata: {e}"))
+    let meta_path = ctx.rim_dir.join(".rim-meta.json");
+    let tmp_path = ctx.rim_dir.join(".rim-meta.json.tmp");
+    fs::write(&tmp_path, contents).map_err(|e| format!("cannot write rim metadata: {e}"))?;
+    fs::rename(&tmp_path, &meta_path).map_err(|e| format!("cannot replace rim metadata: {e}"))
 }
 
 fn read_meta(rim_dir: &Path) -> Option<RimMeta> {
@@ -1180,6 +1220,55 @@ fn dir_size(path: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
+fn is_manager_shortcut(command: &str) -> bool {
+    matches!(
+        command,
+        "install"
+            | "i"
+            | "add"
+            | "remove"
+            | "rm"
+            | "update"
+            | "up"
+            | "ci"
+            | "run"
+            | "test"
+            | "start"
+    )
+}
+
+fn detect_manager(ctx: &RimContext) -> Result<&'static str, String> {
+    let package_json =
+        fs::read_to_string(ctx.project_root.join("package.json")).unwrap_or_default();
+    if ctx.project_root.join("bun.lock").exists()
+        || ctx.project_root.join("bun.lockb").exists()
+        || package_json.contains("\"packageManager\":") && package_json.contains("bun@")
+    {
+        return Ok("bun");
+    }
+    if ctx.project_root.join("package-lock.json").exists()
+        || package_json.contains("\"packageManager\":") && package_json.contains("npm@")
+    {
+        return Ok("npm");
+    }
+    if ctx.project_root.join("pnpm-lock.yaml").exists()
+        || package_json.contains("\"packageManager\":") && package_json.contains("pnpm@")
+    {
+        eprintln!("rim: warning: auto-detected pnpm, which is experimental in rim.");
+        return Ok("pnpm");
+    }
+    if ctx.project_root.join("deno.json").exists() || ctx.project_root.join("deno.jsonc").exists() {
+        return Err("manager auto-detection found Deno, but rim install/run shortcuts target package managers. Use `rim deno ...` directly.".to_owned());
+    }
+    if ctx.project_root.join("package.json").exists() {
+        return Ok("bun");
+    }
+    Err(
+        "cannot auto-detect package manager; use `rim bun ...`, `rim npm ...`, or `rim deno ...`"
+            .to_owned(),
+    )
+}
+
 fn run_tool(
     ctx: &RimContext,
     tool: &str,
@@ -1204,7 +1293,7 @@ fn run_tool(
         clean(ctx)?;
     }
 
-    ensure_layout(ctx)?;
+    ensure_layout_for(ctx, tool)?;
     write_meta(ctx, tool)?;
 
     let needs_ephemeral_install = options.ephemeral

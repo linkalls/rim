@@ -24,6 +24,7 @@ Implemented:
 - `rim gc`
 - `rim path`
 - `rim explain`
+- manager shortcuts: `rim install`, `rim run dev`, `rim test`
 - `rim clean`
 - `rim clean --cache-only`
 - `rim clean --deps-only`
@@ -32,9 +33,11 @@ Implemented:
 - `rim [--dry-run] npm ...`
 - `rim [--dry-run] bun ...`
 - `rim [--dry-run] deno ...` cache env wiring
+- `RIM_PROFILE=ram|cache|external` presets when `RIM_BASE` is unset
 - RAM-backed npm cache / Deno cache / Bun cache envs
 - install-like commands run in a shadow project so npm cannot replace the project symlink with a real directory
 - generated lockfiles are copied back to the real project after successful install-like commands
+- Deno commands skip the project `node_modules` symlink and only redirect cache/env paths
 - `.rim-meta.json` is written into each dependency layer for `rim ls` / `rim gc`
 - `bunfig.toml` is copied into the shadow project for Bun installs
 
@@ -69,7 +72,17 @@ rim bun install
 rim bun run dev
 ```
 
-For Deno, `rim` mainly redirects caches:
+Or let `rim` detect the package manager from lockfiles / `packageManager`:
+
+```bash
+rim install
+rim run dev
+rim test
+```
+
+Detection order is Bun first, then npm, then pnpm as experimental. If only `package.json` exists, `rim` defaults to Bun.
+
+For Deno, `rim` mainly redirects caches and does not create a project `node_modules` symlink:
 
 ```bash
 rim deno run --allow-net main.ts
@@ -216,7 +229,9 @@ The real project gets:
 node_modules -> /dev/shm/rim/app-<hash>/project/node_modules
 ```
 
-Each layer also gets `.rim-meta.json` so `rim ls` and `rim gc` can reverse-map a dependency layer back to its source project, manager, mode, created time, and last-used time.
+Each layer also gets `.rim-meta.json` so `rim ls` and `rim gc` can reverse-map a dependency layer back to its source project, manager, mode, created time, and last-used time. Metadata writes are atomic: `rim` writes a temporary file and renames it into place.
+
+Deno commands are special: `rim deno ...` creates only the dependency-layer metadata/cache root and does not create a `node_modules` symlink in the project.
 
 For install-like commands (`install`, `i`, `add`, `remove`, `rm`, `update`, `up`, `ci`), `rim` runs the package manager inside the RAM shadow project. This matters because `npm install` may replace a pre-existing `node_modules` symlink if it is run directly in the source project.
 
@@ -224,12 +239,20 @@ For non-install commands (`run dev`, `test`, etc.), `rim` runs from the real pro
 
 ## Environment
 
-`RIM_BASE` controls where the dependency layer is stored.
+`RIM_BASE` controls where the dependency layer is stored. If `RIM_BASE` is unset, `RIM_PROFILE` can choose a preset.
 
 Default RAM/tmpfs mode:
 
 ```bash
 RIM_BASE=/dev/shm/rim rim npm install
+```
+
+Profile presets:
+
+```bash
+RIM_PROFILE=ram rim install       # /dev/shm/rim
+RIM_PROFILE=cache rim install     # $HOME/.cache/rim
+RIM_PROFILE=external rim install  # $RIM_EXTERNAL_BASE or /mnt/external/rim
 ```
 
 Default when unset:
@@ -331,7 +354,7 @@ suggestions:
   - lifecycle scripts detected; postinstall/prepare hooks may assume real project cwd.
 ```
 
-`rim explain` is a dry educational view of a wrapped command:
+`rim explain` is a dry educational view of a wrapped command. Shortcuts like `rim install` / `rim run dev` are for real execution; `rim explain` expects the explicit tool name:
 
 ```txt
 tool: bun
@@ -445,7 +468,7 @@ Current suite:
 
 - prepares `node_modules` symlink into RAM base
 - refuses to overwrite a real `node_modules` directory
-- help lists cleanup, inventory, path, explain, and suggestion options
+- help lists cleanup, inventory, path, explain, shortcut, and suggestion options
 - dry-run reports command, `RIM_BASE`, cleanup flags, and cache envs
 - `rim doctor` reports storage/memory risk and project warning signals
 - status/doctor usage counts symlinks without following external targets
@@ -457,6 +480,10 @@ Current suite:
 - `rim gc --dry-run --orphaned` previews orphaned layer cleanup
 - `rim gc --orphaned` removes orphaned layers
 - `rim path` prints script-friendly dependency-layer paths
+- `rim install` / `rim run dev` auto-detect Bun or npm from project files
+- `RIM_PROFILE=cache` maps to `$HOME/.cache/rim` when `RIM_BASE` is unset
+- Deno commands do not create a project `node_modules` symlink
+- `.rim-meta.json` is updated with an atomic write+rename
 - `rim explain` reports the command plan without changing files
 - `rim doctor --suggest` reports practical storage/project suggestions
 - `rim clean --cache-only` and `rim clean --deps-only` remove only one side of the layer
@@ -473,6 +500,7 @@ Current suite:
 - Restarting clears `/dev/shm`; run `rim npm install` again to recreate dependencies.
 - For long-lived or heavy projects on tiny machines, consider `RIM_BASE=$HOME/.cache/rim` or an external drive.
 - `--ephemeral` auto-installs only for package-manager `run`, `test`, and `start` commands for now.
+- Manager shortcuts are intentionally simple: Bun lock/packageManager wins first, then npm, then pnpm experimental.
 - pnpm is not recommended for RAM/tmpfs mode; use npm or bun for the main path, or move `RIM_BASE` to cache/external storage if experimenting with pnpm.
 - Some package-manager edge cases are not handled yet, especially workspaces and lifecycle scripts that assume install cwd is the real source tree.
 - This is intentionally not a global package manager replacement. It is a small wrapper for ephemeral or isolated dependencies.

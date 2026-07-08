@@ -42,6 +42,8 @@ fn help_lists_cleanup_options() {
         "rim gc",
         "rim path",
         "rim explain",
+        "install|run|test|start",
+        "RIM_PROFILE",
         "--suggest",
         "--cache-only",
         "--deps-only",
@@ -240,7 +242,7 @@ fn refuses_to_overwrite_real_node_modules_directory() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("node_modules exists and is not a symlink"),
+        stderr.contains("node_modules exists and is not a symlink. Try:"),
         "stderr: {stderr}"
     );
 }
@@ -269,6 +271,92 @@ fn dry_run_wrapper_reports_env_and_does_not_execute_tool() {
     assert!(
         project.join("node_modules").is_symlink(),
         "dry-run still prepares symlink"
+    );
+}
+
+#[test]
+fn rim_profile_cache_uses_home_cache_when_base_is_unset() {
+    let project = make_project();
+
+    let out = Command::new(bin())
+        .args(["path"])
+        .env_remove("RIM_BASE")
+        .env("RIM_PROFILE", "cache")
+        .current_dir(&project)
+        .output()
+        .expect("rim path with cache profile");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("/.cache/rim/"), "stdout: {stdout}");
+}
+
+#[test]
+fn auto_detects_bun_for_shortcut_commands() {
+    let project = make_project();
+    let base = unique_temp("base");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+
+    let out = Command::new(bin())
+        .args(["--dry-run", "install"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("rim shortcut install");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("command: bun install"), "stdout: {stdout}");
+}
+
+#[test]
+fn auto_detects_npm_from_package_lock() {
+    let project = make_project();
+    let base = unique_temp("base");
+    fs::write(
+        project.join("package-lock.json"),
+        "{\"lockfileVersion\":3}\n",
+    )
+    .expect("lock");
+
+    let out = Command::new(bin())
+        .args(["--dry-run", "run", "dev"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("rim shortcut run dev");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("command: npm run dev"), "stdout: {stdout}");
+}
+
+#[test]
+fn deno_commands_do_not_create_project_node_modules_symlink() {
+    let project = unique_temp("deno-project");
+    let base = unique_temp("base");
+    fs::write(project.join("deno.json"), "{}\n").expect("deno json");
+
+    let out = Command::new(bin())
+        .args(["--dry-run", "deno", "cache", "main.ts"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("rim deno dry-run");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !project.join("node_modules").exists(),
+        "deno cache should not create a project node_modules symlink"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("command: deno cache main.ts"),
+        "stdout: {stdout}"
     );
 }
 
