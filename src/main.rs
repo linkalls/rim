@@ -102,6 +102,10 @@ fn run() -> Result<u8, String> {
             let backup_args = args.split_off(1);
             backup_command(&ctx, &backup_args)
         }
+        "repair" => {
+            let repair_args = args.split_off(1);
+            repair_command(&ctx, &repair_args)
+        }
         "ensure" => {
             let ensure_args = args.split_off(1);
             ensure_command(&ctx, &ensure_args, options)
@@ -181,6 +185,7 @@ Usage:
   rim scan [--json|--diff] <path>...
   rim adopt <project> [--dry-run] [--allow-risk] [--diff-backup]
   rim backup list|show|restore <id|latest> [--dry-run] [--apply-deletes]
+  rim repair --stale-locks [--dry-run]
   rim ensure [bun|npm|pnpm]
   rim pin|unpin
   rim manager
@@ -956,6 +961,41 @@ struct MemoryInfo {
     total_bytes: Option<u64>,
     available_bytes: Option<u64>,
     shmem_bytes: Option<u64>,
+}
+
+fn repair_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
+    let mut stale_locks = false;
+    let mut dry_run = false;
+    for arg in args {
+        match arg.to_str() {
+            Some("--stale-locks") => stale_locks = true,
+            Some("--dry-run") => dry_run = true,
+            Some(other) => return Err(format!("unknown repair option: {other}")),
+            None => return Err("repair options must be valid UTF-8".to_owned()),
+        }
+    }
+    if !stale_locks {
+        return Err("rim repair currently requires --stale-locks".to_owned());
+    }
+    let mut repaired = 0_u64;
+    for layer in collect_layers(ctx) {
+        if matches!(layer.active, ActiveState::Stale(_)) {
+            let lock = active_lock_path(&layer.rim_dir);
+            if dry_run {
+                println!("would remove stale lock: {}", lock.display());
+            } else {
+                fs::remove_file(&lock)
+                    .map_err(|e| format!("cannot remove stale lock {}: {e}", lock.display()))?;
+                println!("removed stale lock: {}", lock.display());
+            }
+            repaired += 1;
+        }
+    }
+    println!(
+        "rim repair: {} {repaired} stale lock(s)",
+        if dry_run { "would remove" } else { "removed" }
+    );
+    Ok(0)
 }
 
 fn pin_command(ctx: &RimContext, pinned: bool) -> Result<u8, String> {
@@ -2178,6 +2218,15 @@ fn print_suggestions(ctx: &RimContext) {
         println!(
             "  - lifecycle scripts detected; postinstall/prepare hooks may assume real project cwd."
         );
+    }
+    let stale_locks = collect_layers(ctx)
+        .into_iter()
+        .filter(|layer| matches!(layer.active, ActiveState::Stale(_)))
+        .count();
+    if stale_locks > 0 {
+        any = true;
+        println!("  - stale active lock(s) detected: {stale_locks}");
+        println!("    Try: rim repair --stale-locks --dry-run");
     }
     if rim_mode(ctx) == "tmpfs" && dir_size(&ctx.rim_base).unwrap_or(0) > 1024 * 1024 * 1024 {
         any = true;

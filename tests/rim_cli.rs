@@ -45,6 +45,7 @@ fn help_lists_cleanup_options() {
         "rim scan",
         "rim adopt",
         "rim backup",
+        "rim repair",
         "rim ensure",
         "rim pin|unpin",
         "rim manager",
@@ -2158,4 +2159,124 @@ fn ls_marks_stale_active_lock() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("ACTIVE"), "stdout: {stdout}");
     assert!(stdout.contains("stale:99999999"), "stdout: {stdout}");
+}
+
+#[test]
+fn repair_stale_locks_dry_run_and_apply() {
+    let project = make_project();
+    let base = unique_temp("base");
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(prepare.status.success());
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir");
+    let lock = rim_dir.join(".rim-active");
+    fs::write(
+        &lock,
+        "{\"pid\":99999999,\"started_at\":0,\"command\":\"dead\"}\n",
+    )
+    .expect("stale lock");
+
+    let dry = Command::new(bin())
+        .args(["repair", "--stale-locks", "--dry-run"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("repair dry-run");
+    assert!(dry.status.success());
+    let stdout = String::from_utf8_lossy(&dry.stdout);
+    assert!(
+        stdout.contains("would remove stale lock"),
+        "stdout: {stdout}"
+    );
+    assert!(lock.exists(), "dry-run should leave stale lock");
+
+    let repair = Command::new(bin())
+        .args(["repair", "--stale-locks"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("repair");
+    assert!(repair.status.success());
+    let stdout = String::from_utf8_lossy(&repair.stdout);
+    assert!(stdout.contains("removed stale lock"), "stdout: {stdout}");
+    assert!(!lock.exists(), "repair should remove stale lock");
+}
+
+#[test]
+fn repair_does_not_remove_live_active_lock() {
+    let project = make_project();
+    let base = unique_temp("base");
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(prepare.status.success());
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir");
+    let lock = rim_dir.join(".rim-active");
+    fs::write(
+        &lock,
+        format!(
+            "{{\"pid\":{},\"started_at\":0,\"command\":\"live\"}}\n",
+            std::process::id()
+        ),
+    )
+    .expect("live lock");
+
+    let repair = Command::new(bin())
+        .args(["repair", "--stale-locks"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("repair");
+    assert!(repair.status.success());
+    let stdout = String::from_utf8_lossy(&repair.stdout);
+    assert!(stdout.contains("removed 0 stale lock"), "stdout: {stdout}");
+    assert!(lock.exists(), "live lock should remain");
+}
+
+#[test]
+fn doctor_suggest_reports_stale_locks() {
+    let project = make_project();
+    let base = unique_temp("base");
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(prepare.status.success());
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir");
+    fs::write(rim_dir.join(".rim-active"), "{\"pid\":99999999}\n").expect("stale lock");
+
+    let doctor = Command::new(bin())
+        .args(["doctor", "--suggest"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("doctor suggest");
+    assert!(doctor.status.success());
+    let stdout = String::from_utf8_lossy(&doctor.stdout);
+    assert!(stdout.contains("stale active lock"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("rim repair --stale-locks --dry-run"),
+        "stdout: {stdout}"
+    );
 }
