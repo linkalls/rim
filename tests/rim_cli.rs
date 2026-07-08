@@ -382,6 +382,110 @@ fn status_counts_symlinks_without_following_targets() {
 }
 
 #[test]
+fn npm_install_trims_cache_by_default_but_keeps_dependencies() {
+    let project = make_project();
+    let base = unique_temp("base");
+    let fake_bin = unique_temp("bin");
+    let fake_npm = fake_bin.join("npm");
+    fs::write(
+        &fake_npm,
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p \"$npm_config_cache\" node_modules/fake\nprintf cache > \"$npm_config_cache/blob\"\nprintf '{\"lockfileVersion\":3}\n' > package-lock.json\n",
+    )
+    .expect("fake npm");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_npm)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .args(["npm", "install"])
+        .env("RIM_BASE", &base)
+        .env("PATH", path)
+        .current_dir(&project)
+        .output()
+        .expect("run rim fake npm install");
+
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir");
+    assert!(
+        link_target.join("fake").exists(),
+        "dependencies should remain installed"
+    );
+    assert!(
+        !rim_dir.join("npm-cache").exists(),
+        "npm cache should be trimmed by default"
+    );
+}
+
+#[test]
+fn keep_cache_preserves_npm_cache_after_install() {
+    let project = make_project();
+    let base = unique_temp("base");
+    let fake_bin = unique_temp("bin");
+    let fake_npm = fake_bin.join("npm");
+    fs::write(
+        &fake_npm,
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p \"$npm_config_cache\" node_modules/fake\nprintf cache > \"$npm_config_cache/blob\"\nprintf '{\"lockfileVersion\":3}\n' > package-lock.json\n",
+    )
+    .expect("fake npm");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_npm)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .args(["--keep-cache", "npm", "install"])
+        .env("RIM_BASE", &base)
+        .env("PATH", path)
+        .current_dir(&project)
+        .output()
+        .expect("run rim fake npm install keep-cache");
+
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir");
+    assert!(
+        rim_dir.join("npm-cache/blob").exists(),
+        "--keep-cache should preserve npm cache"
+    );
+}
+
+#[test]
 fn auto_clean_removes_layer_after_success() {
     let project = make_project();
     let base = unique_temp("base");

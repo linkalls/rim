@@ -29,6 +29,7 @@ struct CliOptions {
     auto_clean: bool,
     keep_on_error: bool,
     ephemeral: bool,
+    keep_cache: bool,
 }
 
 impl CliOptions {
@@ -99,6 +100,7 @@ fn parse_options(args: &mut Vec<OsString>) -> Result<CliOptions, String> {
             "--dry-run" => options.dry_run = true,
             "--auto-clean" => options.auto_clean = true,
             "--keep-on-error" => options.keep_on_error = true,
+            "--keep-cache" => options.keep_cache = true,
             "--ephemeral" => {
                 options.ephemeral = true;
                 options.auto_clean = true;
@@ -122,13 +124,14 @@ Usage:
   rim status
   rim doctor
   rim clean
-  rim [--dry-run] [--auto-clean] [--ephemeral] [--keep-on-error] <bun|npm|pnpm|deno|node|...> [args...]
+  rim [--dry-run] [--auto-clean] [--ephemeral] [--keep-on-error] [--keep-cache] <bun|npm|deno|node|...> [args...]
 
 Options:
   --dry-run        Show command/env without executing
   --auto-clean     Clean dependency layer after command exits
   --ephemeral      Fresh one-shot mode; implies --auto-clean
   --keep-on-error  Preserve layer when wrapped command fails
+  --keep-cache     Keep npm/bun package-manager cache after successful installs
 
 Environment:
   RIM_BASE   dependency layer base directory, default /dev/shm/rim"
@@ -648,6 +651,11 @@ fn run_tool(
     if install_like {
         warn_about_low_rim_space(ctx);
     }
+    if tool == "pnpm" {
+        eprintln!(
+            "rim: warning: pnpm support is experimental and may use significantly more RAM for its store."
+        );
+    }
 
     if options.ephemeral && !options.dry_run {
         clean(ctx)?;
@@ -661,7 +669,7 @@ fn run_tool(
         && (options.dry_run || dependencies_missing(ctx));
 
     if needs_ephemeral_install {
-        let install_code = run_install_like(ctx, tool, options.dry_run)?;
+        let install_code = run_install_like(ctx, tool, options)?;
         if install_code != 0 {
             if options.should_clean_after(install_code) {
                 clean_after_command(ctx);
@@ -690,6 +698,7 @@ fn run_tool(
         println!("auto_clean={}", options.auto_clean || options.ephemeral);
         println!("keep_on_error={}", options.keep_on_error);
         println!("ephemeral={}", options.ephemeral);
+        println!("keep_cache={}", options.keep_cache);
         if needs_ephemeral_install {
             println!("ephemeral_install: {} install", tool);
         }
@@ -701,6 +710,7 @@ fn run_tool(
 
     if install_like && exit_code == 0 {
         sync_mutated_manifests_back(ctx)?;
+        trim_install_cache(ctx, tool, options);
     }
 
     if options.should_clean_after(exit_code) {
@@ -710,18 +720,19 @@ fn run_tool(
     Ok(exit_code)
 }
 
-fn run_install_like(ctx: &RimContext, tool: &str, dry_run: bool) -> Result<u8, String> {
+fn run_install_like(ctx: &RimContext, tool: &str, options: CliOptions) -> Result<u8, String> {
     warn_about_low_rim_space(ctx);
     sync_manifests_to_shadow(ctx)?;
     let args = final_args(ctx, tool, vec![OsString::from("install")]);
 
-    if dry_run {
+    if options.dry_run {
         return Ok(0);
     }
 
     let code = run_command(ctx, tool, &args, &ctx.shadow_project)?;
     if code == 0 {
         sync_mutated_manifests_back(ctx)?;
+        trim_install_cache(ctx, tool, options);
     }
     Ok(code)
 }
@@ -767,6 +778,27 @@ fn exit_status_code(status: ExitStatus) -> u8 {
 fn clean_after_command(ctx: &RimContext) {
     if let Err(err) = clean(ctx) {
         eprintln!("rim: warning: auto-clean failed: {err}");
+    }
+}
+
+fn trim_install_cache(ctx: &RimContext, tool: &str, options: CliOptions) {
+    if options.keep_cache {
+        return;
+    }
+    let cache_dir = match tool {
+        "npm" => Some(&ctx.npm_cache),
+        "bun" => Some(&ctx.bun_cache),
+        _ => None,
+    };
+    if let Some(cache_dir) = cache_dir
+        && cache_dir.exists()
+        && let Err(err) = fs::remove_dir_all(cache_dir)
+    {
+        eprintln!(
+            "rim: warning: failed to trim {} cache {}: {err}",
+            tool,
+            cache_dir.display()
+        );
     }
 }
 

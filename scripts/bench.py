@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Benchmark rim dependency/cache placement across package managers.
 
-npm/pnpm/bun benchmarks measure install dependency placement. They intentionally
-use lifecycle-script-disabling flags where the package manager supports them, so
+npm/bun benchmarks measure install dependency placement. pnpm is available only
+as an experimental opt-in manager. Install benchmarks intentionally use
+lifecycle-script-disabling flags where the package manager supports them, so
 postinstall scripts do not download browser binaries, native toolchains, or other
 surprise payloads.
 
@@ -45,8 +46,10 @@ class Manager:
 
 NODE_MANAGERS = [
     Manager(name="npm", command="npm", kind="node-install"),
-    Manager(name="pnpm", command="pnpm", kind="node-install"),
     Manager(name="bun", command="bun", kind="node-install"),
+]
+EXPERIMENTAL_NODE_MANAGERS = [
+    Manager(name="pnpm", command="pnpm", kind="node-install"),
 ]
 DENO_MANAGER = Manager(name="deno", command="deno", kind="deno-cache")
 
@@ -437,7 +440,7 @@ def main() -> int:
     parser.add_argument("--workdir", type=Path, default=DEFAULT_WORKDIR)
     parser.add_argument("--rim-base", type=Path, default=DEFAULT_RIM_BASE)
     parser.add_argument("--include-heavy", action="store_true")
-    parser.add_argument("--managers", default="npm,pnpm,bun,deno", help="comma-separated managers or all")
+    parser.add_argument("--managers", default="npm,bun,deno", help="comma-separated managers or all; pnpm is experimental opt-in")
     parser.add_argument("--keep", action="store_true", help="keep temporary benchmark projects")
     args = parser.parse_args()
 
@@ -447,7 +450,7 @@ def main() -> int:
 
     package_sets = PACKAGE_SETS + (HEAVY_PACKAGE_SETS if args.include_heavy else [])
     requested = parse_managers(args.managers)
-    manager_map = {m.name: m for m in NODE_MANAGERS + [DENO_MANAGER]}
+    manager_map = {m.name: m for m in NODE_MANAGERS + EXPERIMENTAL_NODE_MANAGERS + [DENO_MANAGER]}
     results: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
 
@@ -484,8 +487,9 @@ def main() -> int:
         "requested_managers": requested,
         "skipped": skipped,
         "notes": [
-            "npm/pnpm/bun install benchmarks disable lifecycle scripts where supported to avoid download/build side effects.",
+            "npm/bun install benchmarks disable lifecycle scripts where supported to avoid download/build side effects.",
             "Deno has no node_modules install step by default, so its case measures DENO_DIR cache placement with deno cache.",
+            "pnpm is experimental opt-in because its store model can use substantially more RAM in a tmpfs-backed layer.",
             "rim is expected to reduce persistent disk usage, not total bytes used while the dependency layer is alive.",
             "The RAM layer is tmpfs-backed by default and disappears on reboot, rim clean, --auto-clean, or --ephemeral cleanup.",
         ],
