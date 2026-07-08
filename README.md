@@ -309,7 +309,7 @@ RIM_BASE=/dev/shm/rim rim npm install
 Profile presets:
 
 ```bash
-RIM_PROFILE=ram rim install       # Linux/WSL: /dev/shm/rim
+RIM_PROFILE=ram rim install       # Linux/WSL: /dev/shm/rim; Windows: requires RIM_RAM_BASE
 RIM_PROFILE=cache rim install     # Linux: $HOME/.cache/rim; Windows: %LOCALAPPDATA%\rim
 RIM_PROFILE=external rim install  # requires $RIM_EXTERNAL_BASE / %RIM_EXTERNAL_BASE%
 ```
@@ -325,7 +325,7 @@ You can choose different operating modes:
 
 | Mode | Example | Tradeoff |
 |---|---|---|
-| RAM/tmpfs | `RIM_BASE=/dev/shm/rim` | Fast and fully disposable; uses RAM/shared memory |
+| RAM/tmpfs | Linux/WSL: `RIM_BASE=/dev/shm/rim`; Windows: `RIM_RAM_BASE=R:\rim RIM_PROFILE=ram` | Fast and fully disposable; uses RAM/shared memory or an explicit RAM disk |
 | Cache isolation | `RIM_BASE=$HOME/.cache/rim` | Saves project directories from `node_modules`; uses normal disk cache |
 | External storage | `RIM_BASE=/mnt/external/rim` | Good for tiny internal disks; dependency mass goes to USB/SSD |
 
@@ -362,9 +362,10 @@ Recommended native Windows modes:
 ```powershell
 $env:RIM_PROFILE = "cache"; rim install
 $env:RIM_PROFILE = "external"; $env:RIM_EXTERNAL_BASE = "E:\rim"; rim install
+$env:RIM_PROFILE = "ram"; $env:RIM_RAM_BASE = "R:\rim"; rim install
 ```
 
-`RIM_PROFILE=ram` is not available on native Windows. For `/dev/shm` tmpfs behavior, use WSL. For a Windows RAM disk, set `RIM_BASE` manually to that RAM-disk path, for example `set RIM_BASE=R:\rim` in `cmd` or `$env:RIM_BASE = "R:\rim"` in PowerShell.
+`RIM_PROFILE=ram` is available on native Windows when `RIM_RAM_BASE` points at an existing RAM disk. `rim` will not create the RAM disk for you or guess a drive letter. You can also bypass profiles and set `RIM_BASE` directly, for example `set RIM_BASE=R:\rim` in `cmd` or `$env:RIM_BASE = "R:\rim"` in PowerShell. For `/dev/shm` tmpfs behavior without a Windows RAM disk, use WSL.
 
 Native Windows `node_modules` links use directory symlinks. Creating them may require Developer Mode, `SeCreateSymbolicLinkPrivilege`, or running the terminal as Administrator. If symlink creation fails, try one of:
 

@@ -82,10 +82,9 @@ pub fn default_rim_base() -> Result<PathBuf, String> {
         Some("external") => env::var_os("RIM_EXTERNAL_BASE")
             .map(PathBuf::from)
             .ok_or_else(|| "RIM_PROFILE=external requires RIM_EXTERNAL_BASE; rim will not guess a drive like D:\\rim".to_owned()),
-        Some("ram") => Err(
-            "RIM_PROFILE=ram is not available on native Windows. Use WSL for /dev/shm tmpfs behavior, or set RIM_BASE to a RAM disk manually."
-                .to_owned(),
-        ),
+        Some("ram") => env::var_os("RIM_RAM_BASE")
+            .map(PathBuf::from)
+            .ok_or_else(|| "RIM_PROFILE=ram on native Windows requires RIM_RAM_BASE pointing at a RAM disk, for example R:\\rim. RIM_BASE can also be set directly.".to_owned()),
         Some(other) => Err(format!(
             "unknown RIM_PROFILE={other}; expected cache, external, or ram"
         )),
@@ -245,21 +244,49 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn windows_ram_profile_is_rejected() {
-        let old = env::var_os("RIM_PROFILE");
+    fn windows_ram_profile_uses_rim_ram_base() {
+        let old_profile = env::var_os("RIM_PROFILE");
+        let old_ram = env::var_os("RIM_RAM_BASE");
         unsafe {
             env::set_var("RIM_PROFILE", "ram");
+            env::set_var("RIM_RAM_BASE", r"R:\rim");
         }
-        let err = default_rim_base().unwrap_err();
-        assert!(err.contains("RIM_PROFILE=ram is not available on native Windows"));
+        assert_eq!(default_rim_base().unwrap(), PathBuf::from(r"R:\rim"));
         unsafe {
-            if let Some(old) = old {
-                env::set_var("RIM_PROFILE", old);
-            } else {
-                env::remove_var("RIM_PROFILE");
+            match old_profile {
+                Some(value) => env::set_var("RIM_PROFILE", value),
+                None => env::remove_var("RIM_PROFILE"),
+            }
+            match old_ram {
+                Some(value) => env::set_var("RIM_RAM_BASE", value),
+                None => env::remove_var("RIM_RAM_BASE"),
             }
         }
     }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_ram_profile_requires_rim_ram_base() {
+        let old_profile = env::var_os("RIM_PROFILE");
+        let old_ram = env::var_os("RIM_RAM_BASE");
+        unsafe {
+            env::set_var("RIM_PROFILE", "ram");
+            env::remove_var("RIM_RAM_BASE");
+        }
+        let err = default_rim_base().unwrap_err();
+        assert!(err.contains("RIM_PROFILE=ram on native Windows requires RIM_RAM_BASE"));
+        unsafe {
+            match old_profile {
+                Some(value) => env::set_var("RIM_PROFILE", value),
+                None => env::remove_var("RIM_PROFILE"),
+            }
+            match old_ram {
+                Some(value) => env::set_var("RIM_RAM_BASE", value),
+                None => env::remove_var("RIM_RAM_BASE"),
+            }
+        }
+    }
+
     #[test]
     #[cfg(windows)]
     fn windows_cache_profile_uses_local_app_data() {
