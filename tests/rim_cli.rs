@@ -280,6 +280,41 @@ fn pnpm_wrapper_injects_store_dir_before_subcommand() {
 }
 
 #[test]
+fn doctor_reports_storage_and_project_risk_signals() {
+    let project = unique_temp("doctor-project");
+    let base = unique_temp("doctor-base");
+    fs::write(
+        project.join("package.json"),
+        "{\"scripts\":{\"postinstall\":\"node setup.js\"},\"workspaces\":[\"packages/*\"]}\n",
+    )
+    .expect("package.json");
+
+    let out = Command::new(bin())
+        .arg("doctor")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("run rim doctor");
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("rim_base:"), "stdout: {stdout}");
+    assert!(stdout.contains("mode:"), "stdout: {stdout}");
+    assert!(stdout.contains("storage:"), "stdout: {stdout}");
+    assert!(stdout.contains("memory:"), "stdout: {stdout}");
+    assert!(stdout.contains("install_risk:"), "stdout: {stdout}");
+    assert!(stdout.contains("workspace: detected"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("lifecycle_scripts: detected"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
 fn clean_removes_only_current_projects_ram_directory_and_dead_symlink() {
     let project = make_project();
     let base = unique_temp("base");

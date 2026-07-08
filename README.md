@@ -1,14 +1,14 @@
 # rim
 
-**rim** is a tiny Rust CLI for keeping project source on disk while putting JavaScript dependency weight in RAM.
+**rim** is a tiny Rust CLI for storage-starved Linux machines: keep project source on disk, but move disposable JavaScript dependency weight into a separate dependency layer.
 
 The core idea:
 
 > Keep source. Evaporate dependencies.
 
-`rim npm install` / `rim pnpm install` / `rim bun install` prepares a RAM-backed shadow project under `/dev/shm`, installs dependencies there, and leaves your real project with only a `node_modules` symlink.
+`rim npm install` / `rim pnpm install` / `rim bun install` prepares a shadow project under `RIM_BASE` (`/dev/shm/rim` by default), installs dependencies there, and leaves your real project with only a `node_modules` symlink.
 
-This is for small experiments and projects where `node_modules` / package-manager caches feel too expensive to leave on disk.
+This is especially useful on small experiments, AI-generated throwaway apps, and mini PCs where 32-64 GB eMMC/SSD storage is more precious than disposable dependency state.
 
 ## Current status
 
@@ -18,6 +18,7 @@ Implemented:
 
 - `rim prepare`
 - `rim status`
+- `rim doctor`
 - `rim clean`
 - `rim [--dry-run] npm ...`
 - `rim [--dry-run] pnpm ...`
@@ -77,7 +78,13 @@ Inspect current mapping:
 rim status
 ```
 
-Remove the current project's RAM dependency directory and `node_modules` symlink:
+Check storage/memory risk before installing:
+
+```bash
+rim doctor
+```
+
+Remove the current project's dependency directory and `node_modules` symlink:
 
 ```bash
 rim clean
@@ -125,17 +132,29 @@ For non-install commands (`run dev`, `test`, etc.), `rim` runs from the real pro
 
 ## Environment
 
-`RIM_BASE` controls where RAM state is stored:
+`RIM_BASE` controls where the dependency layer is stored.
+
+Default RAM/tmpfs mode:
 
 ```bash
 RIM_BASE=/dev/shm/rim rim npm install
 ```
 
-Default:
+Default when unset:
 
 ```txt
 /dev/shm/rim
 ```
+
+You can choose different operating modes:
+
+| Mode | Example | Tradeoff |
+|---|---|---|
+| RAM/tmpfs | `RIM_BASE=/dev/shm/rim` | Fast and fully disposable; uses RAM/shared memory |
+| Cache isolation | `RIM_BASE=$HOME/.cache/rim` | Saves project directories from `node_modules`; uses normal disk cache |
+| External storage | `RIM_BASE=/mnt/external/rim` | Good for tiny internal disks; dependency mass goes to USB/SSD |
+
+So `rim` is not only a RAM trick. The main invariant is: source stays in the project, dependency mass lives somewhere else.
 
 `rim` injects:
 
@@ -154,6 +173,40 @@ For pnpm it also runs:
 pnpm --store-dir <rim-dir>/pnpm-store ...
 ```
 
+## Doctor
+
+`rim doctor` prints the current project's storage and risk profile without running an install:
+
+```txt
+project: /home/poteto/code/app
+rim_base: /dev/shm/rim
+rim_dir: /dev/shm/rim/app-<hash>
+mode: tmpfs
+
+storage:
+  project:
+    available: 27.8 GB
+  rim_base:
+    fs: tmpfs
+    available: 3.7 GB
+
+memory:
+  total: 16.0 GB
+  available: 9.4 GB
+  shmem_used: 420.0 MB
+
+rim:
+  current_project_usage: 128.0 MB
+  total_base_usage: 1.1 GB
+
+risk:
+  install_risk: low
+  workspace: not detected
+  lifecycle_scripts: detected
+```
+
+Install-like commands also warn when `RIM_BASE` has low available space.
+
 ## Measured impact
 
 `rim` is not a compression tool. It moves dependency weight away from
@@ -169,7 +222,8 @@ Run the benchmark suite with:
 python3 scripts/bench_npm.py
 ```
 
-By default it benchmarks several npm dependency sets. Add `--include-heavy` to include the Next.js case used in the checked-in results. All cases use:
+By default it benchmarks several npm dependency sets. Add `--include-heavy` to include the Next.js case used in the checked-in results.
+All cases use:
 
 ```bash
 npm install --ignore-scripts --no-audit --no-fund
@@ -227,15 +281,18 @@ Current suite:
 
 - prepares `node_modules` symlink into RAM base
 - refuses to overwrite a real `node_modules` directory
-- dry-run reports command and cache envs
+- dry-run reports command, `RIM_BASE`, and cache envs
+- `rim doctor` reports storage/memory risk and project warning signals
+- install-like commands warn when `RIM_BASE` is low on space
 - pnpm injects `--store-dir`
 - install-like commands run in RAM shadow project and copy lockfiles back
 - clean removes only the current project's RAM dir and symlink
 
 ## Caveats
 
-- Linux-first. `/dev/shm` is assumed by default.
-- RAM is finite; large Playwright/Next installs can still blow up `/dev/shm`.
+- Linux-first. `/dev/shm` is the default because the main target is small Linux boxes and disposable dependency state.
+- RAM/tmpfs is finite; large Playwright/Next/Expo/Electron installs can still blow up `/dev/shm`.
 - Restarting clears `/dev/shm`; run `rim npm install` again to recreate dependencies.
+- For long-lived or heavy projects on tiny machines, consider `RIM_BASE=$HOME/.cache/rim` or an external drive.
 - Some package-manager edge cases are not handled yet, especially workspaces and lifecycle scripts that assume install cwd is the real source tree.
-- This is intentionally not a global package manager replacement. It is a small wrapper for ephemeral dependencies.
+- This is intentionally not a global package manager replacement. It is a small wrapper for ephemeral or isolated dependencies.

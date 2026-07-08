@@ -9,6 +9,7 @@ use std::process::{Command, ExitCode};
 #[derive(Debug, Clone)]
 struct RimContext {
     project_root: PathBuf,
+    rim_base: PathBuf,
     rim_dir: PathBuf,
     shadow_project: PathBuf,
     node_modules: PathBuf,
@@ -63,6 +64,10 @@ fn run() -> Result<u8, String> {
             status(&ctx);
             Ok(0)
         }
+        "doctor" => {
+            doctor(&ctx);
+            Ok(0)
+        }
         "help" | "--help" | "-h" => {
             print_help();
             Ok(0)
@@ -76,7 +81,7 @@ fn run() -> Result<u8, String> {
 
 fn print_help() {
     println!(
-        "rim - RAM dependency wrapper\n\nUsage:\n  rim prepare\n  rim status\n  rim clean\n  rim [--dry-run] <bun|npm|pnpm|deno|node|...> [args...]\n\nEnvironment:\n  RIM_BASE   RAM base directory, default /dev/shm/rim"
+        "rim - RAM dependency wrapper\n\nUsage:\n  rim prepare\n  rim status\n  rim doctor\n  rim clean\n  rim [--dry-run] <bun|npm|pnpm|deno|node|...> [args...]\n\nEnvironment:\n  RIM_BASE   dependency layer base directory, default /dev/shm/rim"
     );
 }
 
@@ -96,6 +101,7 @@ fn build_context() -> Result<RimContext, String> {
 
     Ok(RimContext {
         project_root,
+        rim_base: base,
         node_modules: shadow_project.join("node_modules"),
         npm_cache: rim_dir.join("npm-cache"),
         xdg_cache: rim_dir.join("xdg-cache"),
@@ -274,11 +280,301 @@ fn clean(ctx: &RimContext) -> Result<(), String> {
 
 fn status(ctx: &RimContext) {
     println!("project: {}", ctx.project_root.display());
+    println!("rim_base: {}", ctx.rim_base.display());
     println!("rim_dir: {}", ctx.rim_dir.display());
     println!("shadow_project: {}", ctx.shadow_project.display());
     println!("node_modules: {}", ctx.node_modules.display());
     let bytes = dir_size(&ctx.rim_dir).unwrap_or(0);
     println!("rim_size_bytes: {bytes}");
+}
+
+#[derive(Debug, Clone)]
+struct StorageInfo {
+    path: PathBuf,
+    mount_point: Option<PathBuf>,
+    fs_type: Option<String>,
+    total_bytes: u64,
+    used_bytes: u64,
+    available_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct MemoryInfo {
+    total_bytes: Option<u64>,
+    available_bytes: Option<u64>,
+    shmem_bytes: Option<u64>,
+}
+
+fn doctor(ctx: &RimContext) {
+    println!("project: {}", ctx.project_root.display());
+    println!("rim_base: {}", ctx.rim_base.display());
+    println!("rim_dir: {}", ctx.rim_dir.display());
+    println!("mode: {}", rim_mode(ctx));
+
+    println!();
+    println!("storage:");
+    print_storage("project", storage_info_for(&ctx.project_root));
+    print_storage("rim_base", storage_info_for(&ctx.rim_base));
+
+    println!();
+    println!("memory:");
+    let memory = read_memory_info();
+    println!(
+        "  total: {}",
+        memory
+            .total_bytes
+            .map(format_bytes)
+            .unwrap_or_else(|| "unknown".to_owned())
+    );
+    println!(
+        "  available: {}",
+        memory
+            .available_bytes
+            .map(format_bytes)
+            .unwrap_or_else(|| "unknown".to_owned())
+    );
+    println!(
+        "  shmem_used: {}",
+        memory
+            .shmem_bytes
+            .map(format_bytes)
+            .unwrap_or_else(|| "unknown".to_owned())
+    );
+
+    println!();
+    println!("rim:");
+    println!(
+        "  current_project_usage: {}",
+        format_bytes(dir_size(&ctx.rim_dir).unwrap_or(0))
+    );
+    println!(
+        "  total_base_usage: {}",
+        format_bytes(dir_size(&ctx.rim_base).unwrap_or(0))
+    );
+
+    println!();
+    println!("risk:");
+    println!("  install_risk: {}", install_risk(ctx));
+    println!(
+        "  workspace: {}",
+        if workspace_detected(ctx) {
+            "detected"
+        } else {
+            "not detected"
+        }
+    );
+    println!(
+        "  lifecycle_scripts: {}",
+        if lifecycle_scripts_detected(ctx) {
+            "detected"
+        } else {
+            "not detected"
+        }
+    );
+}
+
+fn print_storage(label: &str, info: Option<StorageInfo>) {
+    match info {
+        Some(info) => {
+            println!("  {label}:");
+            println!("    path: {}", info.path.display());
+            if let Some(mount_point) = info.mount_point {
+                println!("    mount: {}", mount_point.display());
+            }
+            if let Some(fs_type) = info.fs_type {
+                println!("    fs: {fs_type}");
+            }
+            println!("    total: {}", format_bytes(info.total_bytes));
+            println!("    used: {}", format_bytes(info.used_bytes));
+            println!("    available: {}", format_bytes(info.available_bytes));
+        }
+        None => {
+            println!("  {label}: unknown");
+        }
+    }
+}
+
+fn warn_about_low_rim_space(ctx: &RimContext) {
+    let risk = install_risk(ctx);
+    if matches!(risk, "medium" | "high")
+        && let Some(info) = storage_info_for(&ctx.rim_base)
+    {
+        eprintln!(
+            "rim: warning: RIM_BASE has {} available ({risk} install risk): {}",
+            format_bytes(info.available_bytes),
+            ctx.rim_base.display()
+        );
+    }
+}
+
+fn install_risk(ctx: &RimContext) -> &'static str {
+    const HIGH: u64 = 512 * 1024 * 1024;
+    const MEDIUM: u64 = 1024 * 1024 * 1024;
+    match storage_info_for(&ctx.rim_base).map(|info| info.available_bytes) {
+        Some(bytes) if bytes < HIGH => "high",
+        Some(bytes) if bytes < MEDIUM => "medium",
+        Some(_) => "low",
+        None => "unknown",
+    }
+}
+
+fn rim_mode(ctx: &RimContext) -> String {
+    let fs_type = mount_info_for(&ctx.rim_base).and_then(|mount| mount.fs_type);
+    if fs_type.as_deref() == Some("tmpfs") {
+        "tmpfs".to_owned()
+    } else if ctx.rim_base.starts_with(cache_dir()) {
+        "cache".to_owned()
+    } else {
+        "disk".to_owned()
+    }
+}
+
+fn cache_dir() -> PathBuf {
+    env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .unwrap_or_else(|| PathBuf::from(".cache"))
+}
+
+fn storage_info_for(path: &Path) -> Option<StorageInfo> {
+    let existing = existing_ancestor(path)?;
+    let output = Command::new("df").arg("-kP").arg(&existing).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().nth(1)?;
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    if fields.len() < 6 {
+        return None;
+    }
+    let total_kib = fields[1].parse::<u64>().ok()?;
+    let used_kib = fields[2].parse::<u64>().ok()?;
+    let available_kib = fields[3].parse::<u64>().ok()?;
+    let mount = mount_info_for(&existing);
+    Some(StorageInfo {
+        path: path.to_path_buf(),
+        mount_point: mount.as_ref().map(|m| m.mount_point.clone()),
+        fs_type: mount.and_then(|m| m.fs_type),
+        total_bytes: total_kib.saturating_mul(1024),
+        used_bytes: used_kib.saturating_mul(1024),
+        available_bytes: available_kib.saturating_mul(1024),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct MountInfo {
+    mount_point: PathBuf,
+    fs_type: Option<String>,
+}
+
+fn mount_info_for(path: &Path) -> Option<MountInfo> {
+    let existing = existing_ancestor(path)?;
+    let mounts = fs::read_to_string("/proc/mounts").ok()?;
+    let mut best: Option<MountInfo> = None;
+    for line in mounts.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 3 {
+            continue;
+        }
+        let mount_point = PathBuf::from(unescape_mount_path(fields[1]));
+        if existing.starts_with(&mount_point)
+            && best.as_ref().is_none_or(|current| {
+                mount_point.as_os_str().len() > current.mount_point.as_os_str().len()
+            })
+        {
+            best = Some(MountInfo {
+                mount_point,
+                fs_type: Some(fields[2].to_owned()),
+            });
+        }
+    }
+    best
+}
+
+fn unescape_mount_path(path: &str) -> String {
+    path.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+}
+
+fn existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut candidate = path;
+    loop {
+        if candidate.exists() {
+            return Some(candidate.to_path_buf());
+        }
+        candidate = candidate.parent()?;
+    }
+}
+
+fn read_memory_info() -> MemoryInfo {
+    let Ok(contents) = fs::read_to_string("/proc/meminfo") else {
+        return MemoryInfo::default();
+    };
+    let mut info = MemoryInfo::default();
+    for line in contents.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(key) = parts.next() else { continue };
+        let Some(value) = parts.next().and_then(|v| v.parse::<u64>().ok()) else {
+            continue;
+        };
+        let bytes = value.saturating_mul(1024);
+        match key.trim_end_matches(':') {
+            "MemTotal" => info.total_bytes = Some(bytes),
+            "MemAvailable" => info.available_bytes = Some(bytes),
+            "Shmem" => info.shmem_bytes = Some(bytes),
+            _ => {}
+        }
+    }
+    info
+}
+
+fn workspace_detected(ctx: &RimContext) -> bool {
+    [
+        "pnpm-workspace.yaml",
+        "turbo.json",
+        "rush.json",
+        "lerna.json",
+    ]
+    .iter()
+    .any(|name| ctx.project_root.join(name).exists())
+        || fs::read_to_string(ctx.project_root.join("package.json"))
+            .map(|package_json| package_json.contains("\"workspaces\""))
+            .unwrap_or(false)
+}
+
+fn lifecycle_scripts_detected(ctx: &RimContext) -> bool {
+    let Ok(package_json) = fs::read_to_string(ctx.project_root.join("package.json")) else {
+        return false;
+    };
+    [
+        "\"preinstall\"",
+        "\"install\"",
+        "\"postinstall\"",
+        "\"prepare\"",
+    ]
+    .iter()
+    .any(|needle| package_json.contains(needle))
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = UNITS[0];
+    for next_unit in UNITS {
+        unit = next_unit;
+        if value < 1024.0 || next_unit == "TB" {
+            break;
+        }
+        value /= 1024.0;
+    }
+    if unit == "B" {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {unit}")
+    }
 }
 
 fn dir_size(path: &Path) -> io::Result<u64> {
@@ -305,6 +601,9 @@ fn run_tool(
     dry_run: bool,
 ) -> Result<u8, String> {
     let install_like = is_install_like(tool, &args);
+    if install_like {
+        warn_about_low_rim_space(ctx);
+    }
     ensure_layout(ctx)?;
     if install_like {
         sync_manifests_to_shadow(ctx)?;
@@ -319,6 +618,7 @@ fn run_tool(
 
     if dry_run {
         println!("project: {}", ctx.project_root.display());
+        println!("rim_base: {}", ctx.rim_base.display());
         println!("rim_dir: {}", ctx.rim_dir.display());
         println!("cwd: {}", cwd.display());
         println!("command: {} {}", tool, join_args(&final_args));
@@ -387,6 +687,7 @@ fn join_args(args: &[OsString]) -> String {
 
 fn print_context(ctx: &RimContext) {
     println!("project: {}", ctx.project_root.display());
+    println!("rim_base: {}", ctx.rim_base.display());
     println!("rim_dir: {}", ctx.rim_dir.display());
     println!("shadow_project: {}", ctx.shadow_project.display());
     println!(
