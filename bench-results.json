@@ -1,0 +1,23 @@
+{
+  "package_set": "is-number@7.0.0 + zod@3.25.76",
+  "measurement": "lstat_tree does not follow symlinks; blocks_tree approximates allocated bytes without following symlinks",
+  "conventional": {
+    "seconds": 1.183,
+    "project_lstat_bytes": 3724377,
+    "project_blocks_bytes": 5410816,
+    "node_modules_lstat_bytes": 3719291,
+    "npm_cache_lstat_bytes": 4275612,
+    "total_persistent_lstat_bytes": 7999989
+  },
+  "rim": {
+    "seconds": 1.375,
+    "project_lstat_bytes": 5141,
+    "project_blocks_bytes": 16384,
+    "node_modules_is_symlink": true,
+    "node_modules_link_target": "/dev/shm/rim-bench/rim-bench-rim-9397ed00/project/node_modules",
+    "ram_lstat_bytes": 9265525,
+    "total_persistent_lstat_bytes": 5141
+  },
+  "saved_persistent_lstat_bytes": 7994848,
+  "saved_persistent_percent": 99.94
+}
