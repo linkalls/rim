@@ -7,8 +7,9 @@ lifecycle-script-disabling flags where the package manager supports them, so
 postinstall scripts do not download browser binaries, native toolchains, or other
 surprise payloads.
 
-Deno is different: it has no node_modules install step by default, so the Deno
-case measures cache placement with `deno cache main.ts`.
+Deno is different: it has no node_modules install step by default, so Deno cases
+measure cache placement with `deno cache main.ts`. The same dependency sets are
+used across npm, bun, and deno so manager comparisons are meaningful.
 """
 
 from __future__ import annotations
@@ -90,13 +91,6 @@ HEAVY_PACKAGE_SETS = [
     ),
 ]
 
-DENO_CASES = [
-    PackageSet(
-        name="deno-zod-cache",
-        description="Deno npm: zod cache placement",
-        dependencies={"zod": "3.25.76"},
-    )
-]
 
 
 def command_exists(command: str) -> bool:
@@ -471,7 +465,7 @@ def main() -> int:
                     print(f"!! skipped {manager.name}/{package_set.name}: {err}", file=sys.stderr, flush=True)
                     skipped.append({"manager": manager.name, "case": package_set.name, "reason": str(err)})
         else:
-            for package_set in DENO_CASES:
+            for package_set in package_sets:
                 print(f"== {manager.name}/{package_set.name} ==", flush=True)
                 try:
                     results.append(bench_deno_cache(package_set, args.workdir, args.rim_base, args.keep))
@@ -488,7 +482,7 @@ def main() -> int:
         "skipped": skipped,
         "notes": [
             "npm/bun install benchmarks disable lifecycle scripts where supported to avoid download/build side effects.",
-            "Deno has no node_modules install step by default, so its case measures DENO_DIR cache placement with deno cache.",
+            "The same dependency sets are used across npm, bun, and deno; Deno measures DENO_DIR cache placement with deno cache because it has no node_modules install step by default.",
             "pnpm is experimental opt-in because its store model can use substantially more RAM in a tmpfs-backed layer.",
             "rim is expected to reduce persistent disk usage, not total bytes used while the dependency layer is alive.",
             "The RAM layer is tmpfs-backed by default and disappears on reboot, rim clean, --auto-clean, or --ephemeral cleanup.",

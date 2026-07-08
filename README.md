@@ -409,10 +409,10 @@ Install benchmarks use lifecycle-script-disabling flags where supported:
 ```txt
 npm:  npm install --ignore-scripts --no-audit --no-fund
 bun:  bun install --ignore-scripts
-deno: deno cache main.ts
+deno: deno cache main.ts  # imports the same dependencies through npm:<pkg>@<version> specifiers
 ```
 
-Lifecycle scripts are disabled where supported: the benchmark measures dependency/cache placement, not postinstall downloads such as browser binaries or native build hooks. Deno is measured as cache placement because it has no `node_modules` install step by default. pnpm is excluded from checked-in results and is available only as an experimental opt-in manager.
+Lifecycle scripts are disabled where supported: the benchmark measures dependency/cache placement, not postinstall downloads such as browser binaries or native build hooks. The same dependency sets are used across npm, bun, and deno. Deno is measured as cache placement because it has no `node_modules` install step by default. pnpm is excluded from checked-in results and is available only as an experimental opt-in manager.
 
 Environment for the latest checked-in run:
 
@@ -428,17 +428,21 @@ Measurement: tree walk using lstat, so symlink targets are not counted as projec
 
 | Case | Dependencies | Normal persistent | rim persistent | rim RAM | RAM vs normal | RAM overhead | Saved persistent | Time normal | Time rim |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| npm/tiny-validation | `is-number`, `zod` | 7.6 MB | 5.2 KB | 4.8 MB | 63.53% | -2.8 MB | 99.93% | 1.178s | 1.352s |
-| npm/utility-client | `axios`, `dayjs`, `lodash` | 9.8 MB | 14.9 KB | 6.3 MB | 64.07% | -3.5 MB | 99.85% | 2.207s | 2.405s |
-| npm/hono-api | `@hono/node-server`, `hono`, `zod` | 16.9 MB | 5.6 KB | 7.1 MB | 41.80% | -9.9 MB | 99.97% | 1.772s | 1.942s |
-| npm/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 198.6 MB | 32.8 KB | 63.8 MB | 32.13% | -134.8 MB | 99.98% | 8.781s | 8.664s |
-| npm/next-app | `next`, `react`, `react-dom`, `typescript` | 549.7 MB | 34.0 KB | 324.6 MB | 59.06% | -225.0 MB | 99.99% | 14.572s | 14.581s |
-| bun/tiny-validation | `is-number`, `zod` | 7.4 MB | 4.7 KB | 3.5 MB | 46.50% | -4.0 MB | 99.94% | 0.247s | 0.244s |
-| bun/utility-client | `axios`, `dayjs`, `lodash` | 11.0 MB | 9.4 KB | 4.9 MB | 44.16% | -6.1 MB | 99.92% | 0.304s | 0.327s |
-| bun/hono-api | `@hono/node-server`, `hono`, `zod` | 13.7 MB | 5.0 KB | 5.7 MB | 41.42% | -8.0 MB | 99.96% | 0.319s | 0.259s |
-| bun/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 199.7 MB | 17.0 KB | 90.3 MB | 45.22% | -109.4 MB | 99.99% | 1.411s | 1.359s |
-| bun/next-app | `next`, `react`, `react-dom`, `typescript` | 953.4 MB | 17.5 KB | 463.9 MB | 48.65% | -489.6 MB | 100.00% | 5.824s | 5.418s |
-| deno/deno-zod-cache | `zod` | 4.8 MB | 4.4 KB | 4.6 MB | 95.71% | -210.5 KB | 99.91% | 0.555s | 0.528s |
+| npm/tiny-validation | `is-number`, `zod` | 7.6 MB | 5.2 KB | 4.8 MB | 63.53% | -2.8 MB | 99.93% | 1.156s | 1.390s |
+| npm/utility-client | `axios`, `dayjs`, `lodash` | 9.8 MB | 14.9 KB | 6.3 MB | 64.07% | -3.5 MB | 99.85% | 2.256s | 2.377s |
+| npm/hono-api | `@hono/node-server`, `hono`, `zod` | 16.9 MB | 5.6 KB | 7.1 MB | 41.80% | -9.9 MB | 99.97% | 1.788s | 1.908s |
+| npm/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 198.6 MB | 32.8 KB | 63.8 MB | 32.13% | -134.8 MB | 99.98% | 8.469s | 9.254s |
+| npm/next-app | `next`, `react`, `react-dom`, `typescript` | 549.7 MB | 34.0 KB | 324.6 MB | 59.06% | -225.0 MB | 99.99% | 14.403s | 15.169s |
+| bun/tiny-validation | `is-number`, `zod` | 7.4 MB | 4.7 KB | 3.5 MB | 46.50% | -4.0 MB | 99.94% | 0.250s | 0.273s |
+| bun/utility-client | `axios`, `dayjs`, `lodash` | 11.0 MB | 9.4 KB | 4.9 MB | 44.16% | -6.1 MB | 99.92% | 0.346s | 0.356s |
+| bun/hono-api | `@hono/node-server`, `hono`, `zod` | 13.7 MB | 5.0 KB | 5.7 MB | 41.42% | -8.0 MB | 99.96% | 0.290s | 0.241s |
+| bun/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 199.7 MB | 17.0 KB | 90.3 MB | 45.22% | -109.4 MB | 99.99% | 1.512s | 1.604s |
+| bun/next-app | `next`, `react`, `react-dom`, `typescript` | 953.4 MB | 17.5 KB | 463.9 MB | 48.65% | -489.5 MB | 100.00% | 5.875s | 6.222s |
+| deno/tiny-validation | `is-number`, `zod` | 4.8 MB | 4.6 KB | 4.6 MB | 94.59% | -266.7 KB | 99.91% | 0.600s | 0.526s |
+| deno/utility-client | `axios`, `dayjs`, `lodash` | 5.9 MB | 9.2 KB | 5.2 MB | 88.05% | -727.3 KB | 99.85% | 0.601s | 0.557s |
+| deno/hono-api | `@hono/node-server`, `hono`, `zod` | 10.9 MB | 4.9 KB | 9.8 MB | 89.93% | -1.1 MB | 99.96% | 0.684s | 0.618s |
+| deno/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 108.0 MB | 16.3 KB | 107.3 MB | 99.36% | -708.9 KB | 99.99% | 3.801s | 3.661s |
+| deno/next-app | `next`, `react`, `react-dom`, `typescript` | 498.4 MB | 17.1 KB | 494.7 MB | 99.26% | -3.7 MB | 100.00% | 8.497s | 8.374s |
 
 Latest benchmark summary output:
 
@@ -452,8 +456,12 @@ bun/tiny-validation: persistent 7.4 MB -> 4.7 KB, rim RAM 3.5 MB (46.50% of norm
 bun/utility-client: persistent 11.0 MB -> 9.4 KB, rim RAM 4.9 MB (44.16% of normal, overhead -6.1 MB), saved 99.92%
 bun/hono-api: persistent 13.7 MB -> 5.0 KB, rim RAM 5.7 MB (41.42% of normal, overhead -8.0 MB), saved 99.96%
 bun/react-vite-ts: persistent 199.7 MB -> 17.0 KB, rim RAM 90.3 MB (45.22% of normal, overhead -109.4 MB), saved 99.99%
-bun/next-app: persistent 953.4 MB -> 17.5 KB, rim RAM 463.9 MB (48.65% of normal, overhead -489.6 MB), saved 100.00%
-deno/deno-zod-cache: persistent 4.8 MB -> 4.4 KB, rim RAM 4.6 MB (95.71% of normal, overhead -210.5 KB), saved 99.91%
+bun/next-app: persistent 953.4 MB -> 17.5 KB, rim RAM 463.9 MB (48.65% of normal, overhead -489.5 MB), saved 100.00%
+deno/tiny-validation: persistent 4.8 MB -> 4.6 KB, rim RAM 4.6 MB (94.59% of normal, overhead -266.7 KB), saved 99.91%
+deno/utility-client: persistent 5.9 MB -> 9.2 KB, rim RAM 5.2 MB (88.05% of normal, overhead -727.3 KB), saved 99.85%
+deno/hono-api: persistent 10.9 MB -> 4.9 KB, rim RAM 9.8 MB (89.93% of normal, overhead -1.1 MB), saved 99.96%
+deno/react-vite-ts: persistent 108.0 MB -> 16.3 KB, rim RAM 107.3 MB (99.36% of normal, overhead -708.9 KB), saved 99.99%
+deno/next-app: persistent 498.4 MB -> 17.1 KB, rim RAM 494.7 MB (99.26% of normal, overhead -3.7 MB), saved 100.00%
 ```
 
 Takeaway:

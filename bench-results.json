@@ -16,7 +16,7 @@
   "skipped": [],
   "notes": [
     "npm/bun install benchmarks disable lifecycle scripts where supported to avoid download/build side effects.",
-    "Deno has no node_modules install step by default, so its case measures DENO_DIR cache placement with deno cache.",
+    "The same dependency sets are used across npm, bun, and deno; Deno measures DENO_DIR cache placement with deno cache because it has no node_modules install step by default.",
     "pnpm is experimental opt-in because its store model can use substantially more RAM in a tmpfs-backed layer.",
     "rim is expected to reduce persistent disk usage, not total bytes used while the dependency layer is alive.",
     "The RAM layer is tmpfs-backed by default and disappears on reboot, rim clean, --auto-clean, or --ephemeral cleanup."
@@ -47,27 +47,27 @@
         "--no-fund"
       ],
       "normal": {
-        "seconds": 1.178,
+        "seconds": 1.156,
         "project_lstat_bytes": 3724573,
         "project_allocated_bytes": 5410816,
         "node_modules_lstat_bytes": 3719324,
-        "cache_lstat_bytes": 4275804,
-        "total_persistent_lstat_bytes": 8000377
+        "cache_lstat_bytes": 4275803,
+        "total_persistent_lstat_bytes": 8000376
       },
       "rim": {
-        "seconds": 1.352,
+        "seconds": 1.39,
         "project_lstat_bytes": 5329,
         "project_allocated_bytes": 16384,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/npm/tiny-validation/rim-project-c6069504/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/npm/tiny-validation/rim-project-c6069504",
-        "ram_lstat_bytes": 5082257,
+        "ram_lstat_bytes": 5082519,
         "total_persistent_lstat_bytes": 5329
       },
-      "saved_persistent_lstat_bytes": 7995048,
+      "saved_persistent_lstat_bytes": 7995047,
       "saved_persistent_percent": 99.93,
       "ram_vs_normal_persistent_percent": 63.53,
-      "rim_ram_overhead_lstat_bytes": -2918120
+      "rim_ram_overhead_lstat_bytes": -2917857
     },
     {
       "manager": "npm",
@@ -95,27 +95,27 @@
         "--no-fund"
       ],
       "normal": {
-        "seconds": 2.207,
+        "seconds": 2.256,
         "project_lstat_bytes": 5589704,
         "project_allocated_bytes": 11755520,
         "node_modules_lstat_bytes": 5574564,
-        "cache_lstat_bytes": 4669677,
-        "total_persistent_lstat_bytes": 10259381
+        "cache_lstat_bytes": 4669552,
+        "total_persistent_lstat_bytes": 10259256
       },
       "rim": {
-        "seconds": 2.405,
+        "seconds": 2.377,
         "project_lstat_bytes": 15219,
         "project_allocated_bytes": 24576,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/npm/utility-client/rim-project-1998814e/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/npm/utility-client/rim-project-1998814e",
-        "ram_lstat_bytes": 6573068,
+        "ram_lstat_bytes": 6573185,
         "total_persistent_lstat_bytes": 15219
       },
-      "saved_persistent_lstat_bytes": 10244162,
+      "saved_persistent_lstat_bytes": 10244037,
       "saved_persistent_percent": 99.85,
       "ram_vs_normal_persistent_percent": 64.07,
-      "rim_ram_overhead_lstat_bytes": -3686313
+      "rim_ram_overhead_lstat_bytes": -3686071
     },
     {
       "manager": "npm",
@@ -143,27 +143,27 @@
         "--no-fund"
       ],
       "normal": {
-        "seconds": 1.772,
+        "seconds": 1.788,
         "project_lstat_bytes": 6932134,
         "project_allocated_bytes": 10559488,
         "node_modules_lstat_bytes": 6926441,
-        "cache_lstat_bytes": 10820377,
-        "total_persistent_lstat_bytes": 17752511
+        "cache_lstat_bytes": 10820352,
+        "total_persistent_lstat_bytes": 17752486
       },
       "rim": {
-        "seconds": 1.942,
+        "seconds": 1.908,
         "project_lstat_bytes": 5766,
         "project_allocated_bytes": 16384,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/npm/hono-api/rim-project-977aac01/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/npm/hono-api/rim-project-977aac01",
-        "ram_lstat_bytes": 7420186,
+        "ram_lstat_bytes": 7420361,
         "total_persistent_lstat_bytes": 5766
       },
-      "saved_persistent_lstat_bytes": 17746745,
+      "saved_persistent_lstat_bytes": 17746720,
       "saved_persistent_percent": 99.97,
       "ram_vs_normal_persistent_percent": 41.8,
-      "rim_ram_overhead_lstat_bytes": -10332325
+      "rim_ram_overhead_lstat_bytes": -10332125
     },
     {
       "manager": "npm",
@@ -193,27 +193,27 @@
         "--no-fund"
       ],
       "normal": {
-        "seconds": 8.781,
+        "seconds": 8.469,
         "project_lstat_bytes": 65719882,
         "project_allocated_bytes": 67018752,
         "node_modules_lstat_bytes": 65686372,
-        "cache_lstat_bytes": 142514625,
-        "total_persistent_lstat_bytes": 208234507
+        "cache_lstat_bytes": 142514471,
+        "total_persistent_lstat_bytes": 208234353
       },
       "rim": {
-        "seconds": 8.664,
+        "seconds": 9.254,
         "project_lstat_bytes": 33588,
         "project_allocated_bytes": 45056,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/npm/react-vite-ts/rim-project-48e44fc0/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/npm/react-vite-ts/rim-project-48e44fc0",
-        "ram_lstat_bytes": 66897878,
+        "ram_lstat_bytes": 66898010,
         "total_persistent_lstat_bytes": 33588
       },
-      "saved_persistent_lstat_bytes": 208200919,
+      "saved_persistent_lstat_bytes": 208200765,
       "saved_persistent_percent": 99.98,
       "ram_vs_normal_persistent_percent": 32.13,
-      "rim_ram_overhead_lstat_bytes": -141336629
+      "rim_ram_overhead_lstat_bytes": -141336343
     },
     {
       "manager": "npm",
@@ -242,27 +242,27 @@
         "--no-fund"
       ],
       "normal": {
-        "seconds": 14.572,
+        "seconds": 14.403,
         "project_lstat_bytes": 342355686,
         "project_allocated_bytes": 370458624,
         "node_modules_lstat_bytes": 342320907,
-        "cache_lstat_bytes": 233998840,
-        "total_persistent_lstat_bytes": 576354526
+        "cache_lstat_bytes": 234001060,
+        "total_persistent_lstat_bytes": 576356746
       },
       "rim": {
-        "seconds": 14.581,
+        "seconds": 15.169,
         "project_lstat_bytes": 34852,
         "project_allocated_bytes": 45056,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/npm/next-app/rim-project-5a4eb429/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/npm/next-app/rim-project-5a4eb429",
-        "ram_lstat_bytes": 340381622,
+        "ram_lstat_bytes": 340381813,
         "total_persistent_lstat_bytes": 34852
       },
-      "saved_persistent_lstat_bytes": 576319674,
+      "saved_persistent_lstat_bytes": 576321894,
       "saved_persistent_percent": 99.99,
       "ram_vs_normal_persistent_percent": 59.06,
-      "rim_ram_overhead_lstat_bytes": -235972904
+      "rim_ram_overhead_lstat_bytes": -235974933
     },
     {
       "manager": "bun",
@@ -285,7 +285,7 @@
         "--ignore-scripts"
       ],
       "normal": {
-        "seconds": 0.247,
+        "seconds": 0.25,
         "project_lstat_bytes": 3723273,
         "project_allocated_bytes": 5406720,
         "node_modules_lstat_bytes": 3718499,
@@ -293,19 +293,19 @@
         "total_persistent_lstat_bytes": 7782430
       },
       "rim": {
-        "seconds": 0.244,
+        "seconds": 0.273,
         "project_lstat_bytes": 4854,
         "project_allocated_bytes": 16384,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/bun/tiny-validation/rim-project-cd70a97e/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/bun/tiny-validation/rim-project-cd70a97e",
-        "ram_lstat_bytes": 3618449,
+        "ram_lstat_bytes": 3618663,
         "total_persistent_lstat_bytes": 4854
       },
       "saved_persistent_lstat_bytes": 7777576,
       "saved_persistent_percent": 99.94,
       "ram_vs_normal_persistent_percent": 46.5,
-      "rim_ram_overhead_lstat_bytes": -4163981
+      "rim_ram_overhead_lstat_bytes": -4163767
     },
     {
       "manager": "bun",
@@ -329,7 +329,7 @@
         "--ignore-scripts"
       ],
       "normal": {
-        "seconds": 0.304,
+        "seconds": 0.346,
         "project_lstat_bytes": 5585701,
         "project_allocated_bytes": 11751424,
         "node_modules_lstat_bytes": 5576186,
@@ -337,19 +337,19 @@
         "total_persistent_lstat_bytes": 11536982
       },
       "rim": {
-        "seconds": 0.327,
+        "seconds": 0.356,
         "project_lstat_bytes": 9594,
         "project_allocated_bytes": 20480,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/bun/utility-client/rim-project-b6971764/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/bun/utility-client/rim-project-b6971764",
-        "ram_lstat_bytes": 5094165,
+        "ram_lstat_bytes": 5094378,
         "total_persistent_lstat_bytes": 9594
       },
       "saved_persistent_lstat_bytes": 11527388,
       "saved_persistent_percent": 99.92,
       "ram_vs_normal_persistent_percent": 44.16,
-      "rim_ram_overhead_lstat_bytes": -6442817
+      "rim_ram_overhead_lstat_bytes": -6442604
     },
     {
       "manager": "bun",
@@ -373,7 +373,7 @@
         "--ignore-scripts"
       ],
       "normal": {
-        "seconds": 0.319,
+        "seconds": 0.29,
         "project_lstat_bytes": 6930232,
         "project_allocated_bytes": 10555392,
         "node_modules_lstat_bytes": 6925220,
@@ -381,19 +381,19 @@
         "total_persistent_lstat_bytes": 14380259
       },
       "rim": {
-        "seconds": 0.259,
+        "seconds": 0.241,
         "project_lstat_bytes": 5085,
         "project_allocated_bytes": 16384,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/bun/hono-api/rim-project-8903825e/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/bun/hono-api/rim-project-8903825e",
-        "ram_lstat_bytes": 5955744,
+        "ram_lstat_bytes": 5955951,
         "total_persistent_lstat_bytes": 5085
       },
       "saved_persistent_lstat_bytes": 14375174,
       "saved_persistent_percent": 99.96,
       "ram_vs_normal_persistent_percent": 41.42,
-      "rim_ram_overhead_lstat_bytes": -8424515
+      "rim_ram_overhead_lstat_bytes": -8424308
     },
     {
       "manager": "bun",
@@ -419,7 +419,7 @@
         "--ignore-scripts"
       ],
       "normal": {
-        "seconds": 1.411,
+        "seconds": 1.512,
         "project_lstat_bytes": 94967010,
         "project_allocated_bytes": 96280576,
         "node_modules_lstat_bytes": 94949723,
@@ -427,19 +427,19 @@
         "total_persistent_lstat_bytes": 209390385
       },
       "rim": {
-        "seconds": 1.359,
+        "seconds": 1.604,
         "project_lstat_bytes": 17365,
         "project_allocated_bytes": 28672,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/bun/react-vite-ts/rim-project-bd5b4418/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/bun/react-vite-ts/rim-project-bd5b4418",
-        "ram_lstat_bytes": 94686618,
+        "ram_lstat_bytes": 94686830,
         "total_persistent_lstat_bytes": 17365
       },
       "saved_persistent_lstat_bytes": 209373020,
       "saved_persistent_percent": 99.99,
       "ram_vs_normal_persistent_percent": 45.22,
-      "rim_ram_overhead_lstat_bytes": -114703767
+      "rim_ram_overhead_lstat_bytes": -114703555
     },
     {
       "manager": "bun",
@@ -464,7 +464,7 @@
         "--ignore-scripts"
       ],
       "normal": {
-        "seconds": 5.824,
+        "seconds": 5.875,
         "project_lstat_bytes": 489868650,
         "project_allocated_bytes": 517996544,
         "node_modules_lstat_bytes": 489850827,
@@ -472,26 +472,27 @@
         "total_persistent_lstat_bytes": 999722196
       },
       "rim": {
-        "seconds": 5.418,
+        "seconds": 6.222,
         "project_lstat_bytes": 17896,
         "project_allocated_bytes": 28672,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/bun/next-app/rim-project-3f87dfd4/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/bun/next-app/rim-project-3f87dfd4",
-        "ram_lstat_bytes": 486391730,
+        "ram_lstat_bytes": 486391937,
         "total_persistent_lstat_bytes": 17896
       },
       "saved_persistent_lstat_bytes": 999704300,
       "saved_persistent_percent": 100.0,
       "ram_vs_normal_persistent_percent": 48.65,
-      "rim_ram_overhead_lstat_bytes": -513330466
+      "rim_ram_overhead_lstat_bytes": -513330259
     },
     {
       "manager": "deno",
       "kind": "deno-cache",
-      "name": "deno-zod-cache",
-      "description": "Deno npm: zod cache placement",
+      "name": "tiny-validation",
+      "description": "tiny + validator dependency pair",
       "dependencies": {
+        "is-number": "7.0.0",
         "zod": "3.25.76"
       },
       "normal_command": [
@@ -506,26 +507,201 @@
         "main.ts"
       ],
       "normal": {
-        "seconds": 0.555,
-        "project_lstat_bytes": 4445,
+        "seconds": 0.6,
+        "project_lstat_bytes": 4680,
         "project_allocated_bytes": 16384,
-        "cache_lstat_bytes": 5022404,
-        "total_persistent_lstat_bytes": 5026849
+        "cache_lstat_bytes": 5045714,
+        "total_persistent_lstat_bytes": 5050394
       },
       "rim": {
-        "seconds": 0.528,
-        "project_lstat_bytes": 4525,
-        "project_allocated_bytes": 20480,
-        "node_modules_is_symlink": true,
-        "node_modules_link_target": "/dev/shm/rim-bench/deno/deno-zod-cache/rim-project-08f14325/project/node_modules",
-        "rim_dir": "/dev/shm/rim-bench/deno/deno-zod-cache/rim-project-08f14325",
-        "ram_lstat_bytes": 4811328,
-        "total_persistent_lstat_bytes": 4525
+        "seconds": 0.526,
+        "project_lstat_bytes": 4680,
+        "project_allocated_bytes": 16384,
+        "node_modules_is_symlink": false,
+        "node_modules_link_target": null,
+        "rim_dir": "/dev/shm/rim-bench/deno/tiny-validation/rim-project-642ae38d",
+        "ram_lstat_bytes": 4777251,
+        "total_persistent_lstat_bytes": 4680
       },
-      "saved_persistent_lstat_bytes": 5022324,
+      "saved_persistent_lstat_bytes": 5045714,
       "saved_persistent_percent": 99.91,
-      "ram_vs_normal_persistent_percent": 95.71,
-      "rim_ram_overhead_lstat_bytes": -215521
+      "ram_vs_normal_persistent_percent": 94.59,
+      "rim_ram_overhead_lstat_bytes": -273143
+    },
+    {
+      "manager": "deno",
+      "kind": "deno-cache",
+      "name": "utility-client",
+      "description": "common utility/client libraries",
+      "dependencies": {
+        "axios": "1.13.2",
+        "dayjs": "1.11.19",
+        "lodash": "4.17.21"
+      },
+      "normal_command": [
+        "deno",
+        "cache",
+        "main.ts"
+      ],
+      "rim_command": [
+        "rim",
+        "deno",
+        "cache",
+        "main.ts"
+      ],
+      "normal": {
+        "seconds": 0.601,
+        "project_lstat_bytes": 9457,
+        "project_allocated_bytes": 20480,
+        "cache_lstat_bytes": 6220695,
+        "total_persistent_lstat_bytes": 6230152
+      },
+      "rim": {
+        "seconds": 0.557,
+        "project_lstat_bytes": 9457,
+        "project_allocated_bytes": 20480,
+        "node_modules_is_symlink": false,
+        "node_modules_link_target": null,
+        "rim_dir": "/dev/shm/rim-bench/deno/utility-client/rim-project-a20dd6f7",
+        "ram_lstat_bytes": 5485437,
+        "total_persistent_lstat_bytes": 9457
+      },
+      "saved_persistent_lstat_bytes": 6220695,
+      "saved_persistent_percent": 99.85,
+      "ram_vs_normal_persistent_percent": 88.05,
+      "rim_ram_overhead_lstat_bytes": -744715
+    },
+    {
+      "manager": "deno",
+      "kind": "deno-cache",
+      "name": "hono-api",
+      "description": "small API stack",
+      "dependencies": {
+        "@hono/node-server": "1.19.6",
+        "hono": "4.12.9",
+        "zod": "4.3.6"
+      },
+      "normal_command": [
+        "deno",
+        "cache",
+        "main.ts"
+      ],
+      "rim_command": [
+        "rim",
+        "deno",
+        "cache",
+        "main.ts"
+      ],
+      "normal": {
+        "seconds": 0.684,
+        "project_lstat_bytes": 4998,
+        "project_allocated_bytes": 16384,
+        "cache_lstat_bytes": 11385628,
+        "total_persistent_lstat_bytes": 11390626
+      },
+      "rim": {
+        "seconds": 0.618,
+        "project_lstat_bytes": 4998,
+        "project_allocated_bytes": 16384,
+        "node_modules_is_symlink": false,
+        "node_modules_link_target": null,
+        "rim_dir": "/dev/shm/rim-bench/deno/hono-api/rim-project-e5f19033",
+        "ram_lstat_bytes": 10243476,
+        "total_persistent_lstat_bytes": 4998
+      },
+      "saved_persistent_lstat_bytes": 11385628,
+      "saved_persistent_percent": 99.96,
+      "ram_vs_normal_persistent_percent": 89.93,
+      "rim_ram_overhead_lstat_bytes": -1147150
+    },
+    {
+      "manager": "deno",
+      "kind": "deno-cache",
+      "name": "react-vite-ts",
+      "description": "small frontend stack",
+      "dependencies": {
+        "@vitejs/plugin-react": "6.0.3",
+        "react": "19.2.7",
+        "react-dom": "19.2.7",
+        "typescript": "6.0.3",
+        "vite": "8.1.3"
+      },
+      "normal_command": [
+        "deno",
+        "cache",
+        "main.ts"
+      ],
+      "rim_command": [
+        "rim",
+        "deno",
+        "cache",
+        "main.ts"
+      ],
+      "normal": {
+        "seconds": 3.801,
+        "project_lstat_bytes": 16713,
+        "project_allocated_bytes": 24576,
+        "cache_lstat_bytes": 113257014,
+        "total_persistent_lstat_bytes": 113273727
+      },
+      "rim": {
+        "seconds": 3.661,
+        "project_lstat_bytes": 16713,
+        "project_allocated_bytes": 24576,
+        "node_modules_is_symlink": false,
+        "node_modules_link_target": null,
+        "rim_dir": "/dev/shm/rim-bench/deno/react-vite-ts/rim-project-f9bfa20a",
+        "ram_lstat_bytes": 112547763,
+        "total_persistent_lstat_bytes": 16713
+      },
+      "saved_persistent_lstat_bytes": 113257014,
+      "saved_persistent_percent": 99.99,
+      "ram_vs_normal_persistent_percent": 99.36,
+      "rim_ram_overhead_lstat_bytes": -725964
+    },
+    {
+      "manager": "deno",
+      "kind": "deno-cache",
+      "name": "next-app",
+      "description": "heavier React framework stack",
+      "dependencies": {
+        "next": "16.2.10",
+        "react": "19.2.7",
+        "react-dom": "19.2.7",
+        "typescript": "6.0.3"
+      },
+      "normal_command": [
+        "deno",
+        "cache",
+        "main.ts"
+      ],
+      "rim_command": [
+        "rim",
+        "deno",
+        "cache",
+        "main.ts"
+      ],
+      "normal": {
+        "seconds": 8.497,
+        "project_lstat_bytes": 17552,
+        "project_allocated_bytes": 28672,
+        "cache_lstat_bytes": 522617362,
+        "total_persistent_lstat_bytes": 522634914
+      },
+      "rim": {
+        "seconds": 8.374,
+        "project_lstat_bytes": 17552,
+        "project_allocated_bytes": 28672,
+        "node_modules_is_symlink": false,
+        "node_modules_link_target": null,
+        "rim_dir": "/dev/shm/rim-bench/deno/next-app/rim-project-065734b7",
+        "ram_lstat_bytes": 518764128,
+        "total_persistent_lstat_bytes": 17552
+      },
+      "saved_persistent_lstat_bytes": 522617362,
+      "saved_persistent_percent": 100.0,
+      "ram_vs_normal_persistent_percent": 99.26,
+      "rim_ram_overhead_lstat_bytes": -3870786
     }
   ]
 }
