@@ -156,40 +156,64 @@ pnpm --store-dir <rim-dir>/pnpm-store ...
 
 ## Measured impact
 
-Environment:
+`rim` is not a compression tool. It moves dependency weight away from
+persistent project/cache directories and into the RAM-backed `RIM_BASE` layer.
+That means RAM usage can be roughly the same as, or slightly larger than, a
+normal install while the layer is alive.
+
+The useful number is persistent disk left behind by the project.
+
+Run the benchmark suite with:
+
+```bash
+python3 scripts/bench_npm.py
+```
+
+By default it benchmarks several npm dependency sets. Add `--include-heavy` to include the Next.js case used in the checked-in results. All cases use:
+
+```bash
+npm install --ignore-scripts --no-audit --no-fund
+```
+
+`--ignore-scripts` is intentional: the benchmark measures dependency placement,
+not lifecycle downloads such as browser binaries or native build hooks.
+
+Environment for the latest checked-in run:
 
 ```txt
 OS: Linux
 Node: v22.22.0
 npm: 10.9.4
 rim: target/release/rim
-Package set: is-number@7.0.0 + zod@3.25.76
-Command: npm install --ignore-scripts --no-audit --no-fund
+Measurement: tree walk using lstat, so symlink targets are not counted as project disk usage
 ```
 
-Measured with a tree walk using `lstat`, so symlink targets are **not** counted as project disk usage.
+| Package set | Dependencies | Normal persistent | rim persistent | rim RAM | Saved persistent | Time normal | Time rim |
+|---|---|---:|---:|---:|---:|---:|---:|
+| tiny-validation | `is-number`, `zod` | 7.6 MB | 5.2 KB | 8.8 MB | 99.93% | 1.210s | 1.361s |
+| utility-client | `axios`, `dayjs`, `lodash` | 9.8 MB | 14.9 KB | 10.0 MB | 99.85% | 2.173s | 2.263s |
+| hono-api | `@hono/node-server`, `hono`, `zod` | 16.9 MB | 5.6 KB | 17.3 MB | 99.97% | 1.769s | 1.869s |
+| react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 198.6 MB | 32.8 KB | 198.4 MB | 99.98% | 8.536s | 8.416s |
+| next-app | `next`, `react`, `react-dom`, `typescript` | 549.7 MB | 34.0 KB | 546.6 MB | 99.99% | 14.268s | 14.403s |
 
-| Mode | Time | Persistent project bytes | Persistent cache bytes | Persistent total | RAM bytes |
-|---|---:|---:|---:|---:|---:|
-| normal npm | 1.183s | 3,724,377 | 4,275,612 | 7,999,989 | 0 |
-| rim npm | 1.375s | 5,141 | 0 | 5,141 | 9,265,525 |
+Takeaway:
 
-Result:
+- Persistent project/cache footprint drops by about 99.85-99.99% in these runs.
+- RAM usage is not magic: for tiny installs it can be a bit larger than normal
+  persistent usage because `rim` keeps a shadow project plus RAM caches.
+- For larger small-app stacks, the RAM layer is roughly the dependency mass that
+  would otherwise live on disk.
+- Rebooting, `rim clean`, or deleting `RIM_BASE` removes the dependency layer.
 
-```txt
-persistent disk saved: 7,994,848 bytes
-persistent disk reduction: 99.94%
-extra time in this run: ~0.192s
-```
+Full machine-readable results are in `bench-results.json`.
 
-Functional check after `rim npm install`:
+Heavy package sets such as Next.js are opt-in when rerunning the suite:
 
 ```bash
-node -e "const {z}=require('zod'); console.log(z.string().parse('ok'))"
-# ok
+python3 scripts/bench_npm.py --include-heavy
 ```
 
-So for this tiny dependency set, the persistent disk footprint went from about **8.0 MB** to about **5 KB**. The dependency mass moved to `/dev/shm` and disappears on reboot or `rim clean`.
+Use that only when `/dev/shm` has enough free space.
 
 ## Tests
 
