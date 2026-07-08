@@ -289,19 +289,19 @@ Measurement: tree walk using lstat, so symlink targets are not counted as projec
 
 | Package set | Dependencies | Normal persistent | rim persistent | rim RAM | RAM vs normal | RAM overhead | Saved persistent | Time normal | Time rim |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| tiny-validation | `is-number`, `zod` | 7.6 MB | 5.2 KB | 8.8 MB | 115.82% | +1.2 MB | 99.93% | 1.210s | 1.361s |
-| utility-client | `axios`, `dayjs`, `lodash` | 9.8 MB | 14.9 KB | 10.0 MB | 101.86% | +186.0 KB | 99.85% | 2.173s | 2.263s |
-| hono-api | `@hono/node-server`, `hono`, `zod` | 16.9 MB | 5.6 KB | 17.3 MB | 102.05% | +355.1 KB | 99.97% | 1.769s | 1.869s |
-| react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 198.6 MB | 32.8 KB | 198.4 MB | 99.90% | -208.0 KB | 99.98% | 8.536s | 8.416s |
-| next-app | `next`, `react`, `react-dom`, `typescript` | 549.7 MB | 34.0 KB | 546.6 MB | 99.45% | -3.0 MB | 99.99% | 14.268s | 14.403s |
+| tiny-validation | `is-number`, `zod` | 7.6 MB | 5.2 KB | 8.8 MB | 115.82% | +1.2 MB | 99.93% | 1.376s | 1.379s |
+| utility-client | `axios`, `dayjs`, `lodash` | 9.8 MB | 14.9 KB | 10.0 MB | 101.86% | +186.2 KB | 99.85% | 2.186s | 2.422s |
+| hono-api | `@hono/node-server`, `hono`, `zod` | 16.9 MB | 5.6 KB | 17.3 MB | 102.05% | +355.2 KB | 99.97% | 1.774s | 1.955s |
+| react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 198.6 MB | 32.8 KB | 198.4 MB | 99.90% | -208.2 KB | 99.98% | 8.408s | 8.448s |
+| next-app | `next`, `react`, `react-dom`, `typescript` | 549.7 MB | 34.0 KB | 546.6 MB | 99.45% | -3.0 MB | 99.99% | 14.154s | 14.299s |
 
 Latest benchmark summary output:
 
 ```txt
 tiny-validation: persistent 7.6 MB -> 5.2 KB, rim RAM 8.8 MB (115.82% of normal, overhead +1.2 MB), saved 99.93%
-utility-client: persistent 9.8 MB -> 14.9 KB, rim RAM 10.0 MB (101.86% of normal, overhead +186.0 KB), saved 99.85%
-hono-api: persistent 16.9 MB -> 5.6 KB, rim RAM 17.3 MB (102.05% of normal, overhead +355.1 KB), saved 99.97%
-react-vite-ts: persistent 198.6 MB -> 32.8 KB, rim RAM 198.4 MB (99.90% of normal, overhead -208.0 KB), saved 99.98%
+utility-client: persistent 9.8 MB -> 14.9 KB, rim RAM 10.0 MB (101.86% of normal, overhead +186.2 KB), saved 99.85%
+hono-api: persistent 16.9 MB -> 5.6 KB, rim RAM 17.3 MB (102.05% of normal, overhead +355.2 KB), saved 99.97%
+react-vite-ts: persistent 198.6 MB -> 32.8 KB, rim RAM 198.4 MB (99.90% of normal, overhead -208.2 KB), saved 99.98%
 next-app: persistent 549.7 MB -> 34.0 KB, rim RAM 546.6 MB (99.45% of normal, overhead -3.0 MB), saved 99.99%
 ```
 
