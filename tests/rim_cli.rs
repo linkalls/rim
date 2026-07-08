@@ -39,6 +39,16 @@ fn create_test_file_link(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_file(target, link)
 }
 
+#[cfg(unix)]
+fn create_test_dir_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_test_dir_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
 #[test]
 fn help_lists_cleanup_options() {
     let out = Command::new(bin())
@@ -2682,4 +2692,114 @@ fn adopt_copy_rolls_back_when_symlink_creation_fails() {
         !path_contains_name(&base, "node_modules"),
         "copied layer node_modules should be cleaned on rollback"
     );
+}
+
+#[test]
+fn repair_broken_links_dry_run_and_apply() {
+    let project = unique_temp("repair-broken-link-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    let missing_target = base.join("app-deadbeef/project/node_modules");
+    fs::create_dir_all(missing_target.parent().unwrap()).expect("target parent");
+    create_test_dir_link(&missing_target, &project.join("node_modules")).expect("broken link");
+
+    let dry = Command::new(bin())
+        .args(["repair", "--broken-links", "--dry-run"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("repair broken dry-run");
+    assert!(dry.status.success());
+    let stdout = String::from_utf8_lossy(&dry.stdout);
+    assert!(
+        stdout.contains("would remove broken node_modules link"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("next: rim ensure"), "stdout: {stdout}");
+    assert!(project.join("node_modules").is_symlink());
+
+    let apply = Command::new(bin())
+        .args(["repair", "--broken-links"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("repair broken apply");
+    assert!(apply.status.success());
+    let stdout = String::from_utf8_lossy(&apply.stdout);
+    assert!(
+        stdout.contains("removed broken node_modules link"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("next: rim ensure"), "stdout: {stdout}");
+    assert!(!project.join("node_modules").exists());
+}
+
+#[test]
+fn repair_broken_links_ignores_non_rim_links_and_live_links() {
+    let project = unique_temp("repair-non-rim-link-project");
+    let base = unique_temp("base");
+    let outside = unique_temp("outside");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    let outside_missing = outside.join("missing-node_modules");
+    create_test_dir_link(&outside_missing, &project.join("node_modules")).expect("outside link");
+
+    let out = Command::new(bin())
+        .args(["repair", "--broken-links"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("repair non-rim");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("removed 0 broken node_modules link(s)"),
+        "stdout: {stdout}"
+    );
+    assert!(project.join("node_modules").is_symlink());
+
+    fs::remove_file(project.join("node_modules")).expect("remove outside link");
+    let live_target = base.join("app-live/project/node_modules");
+    fs::create_dir_all(&live_target).expect("live target");
+    create_test_dir_link(&live_target, &project.join("node_modules")).expect("live rim link");
+    let out = Command::new(bin())
+        .args(["repair", "--broken-links"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("repair live rim");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("removed 0 broken node_modules link(s)"),
+        "stdout: {stdout}"
+    );
+    assert!(project.join("node_modules").is_symlink());
+}
+
+#[test]
+fn doctor_suggest_reports_broken_rim_link() {
+    let project = unique_temp("doctor-broken-link-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    let missing_target = base.join("app-deadbeef/project/node_modules");
+    fs::create_dir_all(missing_target.parent().unwrap()).expect("target parent");
+    create_test_dir_link(&missing_target, &project.join("node_modules")).expect("broken link");
+
+    let out = Command::new(bin())
+        .args(["doctor", "--suggest"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("doctor suggest broken link");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("broken rim-managed node_modules link"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("rim repair --broken-links --dry-run"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("rim ensure"), "stdout: {stdout}");
 }

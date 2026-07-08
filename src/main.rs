@@ -187,7 +187,7 @@ Usage:
   rim scan [--json|--diff] <path>...
   rim adopt <project> [--dry-run] [--allow-risk] [--diff-backup] [--copy]
   rim backup list|show|restore <id|latest> [--dry-run] [--apply-deletes]
-  rim repair --stale-locks [--dry-run]
+  rim repair --stale-locks|--broken-links [--dry-run]
   rim ensure [bun|npm|pnpm]
   rim pin|unpin
   rim manager
@@ -964,18 +964,30 @@ struct MemoryInfo {
 
 fn repair_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
     let mut stale_locks = false;
+    let mut broken_links = false;
     let mut dry_run = false;
     for arg in args {
         match arg.to_str() {
             Some("--stale-locks") => stale_locks = true,
+            Some("--broken-links") => broken_links = true,
             Some("--dry-run") => dry_run = true,
             Some(other) => return Err(format!("unknown repair option: {other}")),
             None => return Err("repair options must be valid UTF-8".to_owned()),
         }
     }
-    if !stale_locks {
-        return Err("rim repair currently requires --stale-locks".to_owned());
+    if !stale_locks && !broken_links {
+        return Err("rim repair currently requires --stale-locks or --broken-links".to_owned());
     }
+    if stale_locks {
+        repair_stale_locks(ctx, dry_run)?;
+    }
+    if broken_links {
+        repair_broken_links(ctx, dry_run)?;
+    }
+    Ok(0)
+}
+
+fn repair_stale_locks(ctx: &RimContext, dry_run: bool) -> Result<(), String> {
     let mut repaired = 0_u64;
     for layer in collect_layers(ctx) {
         if matches!(layer.active, ActiveState::Stale(_)) {
@@ -994,7 +1006,46 @@ fn repair_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
         "rim repair: {} {repaired} stale lock(s)",
         if dry_run { "would remove" } else { "removed" }
     );
-    Ok(0)
+    Ok(())
+}
+
+fn repair_broken_links(ctx: &RimContext, dry_run: bool) -> Result<(), String> {
+    let link = ctx.project_root.join("node_modules");
+    let mut repaired = 0_u64;
+    if platform::is_dir_link(&link) {
+        let target = platform::read_dir_link(&link)
+            .map_err(|e| format!("cannot read node_modules link: {e}"))?;
+        if target.starts_with(&ctx.rim_base) && !target.exists() {
+            if dry_run {
+                println!(
+                    "would remove broken node_modules link: {} -> {}",
+                    link.display(),
+                    target.display()
+                );
+            } else {
+                platform::remove_dir_link(&link).map_err(|e| {
+                    format!(
+                        "cannot remove broken node_modules link {}: {e}",
+                        link.display()
+                    )
+                })?;
+                println!(
+                    "removed broken node_modules link: {} -> {}",
+                    link.display(),
+                    target.display()
+                );
+            }
+            repaired += 1;
+        }
+    }
+    println!(
+        "rim repair: {} {repaired} broken node_modules link(s)",
+        if dry_run { "would remove" } else { "removed" }
+    );
+    if repaired > 0 {
+        println!("next: rim ensure");
+    }
+    Ok(())
 }
 
 fn pin_command(ctx: &RimContext, pinned: bool) -> Result<u8, String> {
@@ -2417,6 +2468,14 @@ fn explain(ctx: &RimContext, args: &[OsString], options: CliOptions) -> Result<u
     Ok(0)
 }
 
+fn current_project_has_broken_rim_link(ctx: &RimContext) -> bool {
+    let link = ctx.project_root.join("node_modules");
+    platform::is_dir_link(&link)
+        && platform::read_dir_link(&link)
+            .map(|target| target.starts_with(&ctx.rim_base) && !target.exists())
+            .unwrap_or(false)
+}
+
 fn print_suggestions(ctx: &RimContext) {
     println!();
     println!("suggestions:");
@@ -2457,6 +2516,12 @@ fn print_suggestions(ctx: &RimContext) {
         any = true;
         println!("  - stale active lock(s) detected: {stale_locks}");
         println!("    Try: rim repair --stale-locks --dry-run");
+    }
+    if current_project_has_broken_rim_link(ctx) {
+        any = true;
+        println!("  - broken rim-managed node_modules link detected");
+        println!("    Try: rim repair --broken-links --dry-run");
+        println!("    Then: rim ensure");
     }
     if rim_mode(ctx) == "tmpfs" && dir_size(&ctx.rim_base).unwrap_or(0) > 1024 * 1024 * 1024 {
         any = true;

@@ -36,7 +36,7 @@ Implemented:
 - `rim clean --cache-only`
 - `rim clean --deps-only`
 - active layer locks: `.rim-active`, `rim clean --force`, `rim gc --force`
-- `rim repair --stale-locks`
+- `rim repair --stale-locks` / `rim repair --broken-links`
 - `rim --auto-clean ...`
 - `rim --ephemeral ...`
 - `rim [--dry-run] npm ...`
@@ -162,11 +162,14 @@ rim backup restore latest --dry-run
 rim backup restore latest
 ```
 
-Repair stale active locks left by dead processes:
+Repair stale active locks left by dead processes, or remove a broken rim-managed `node_modules` link after `/dev/shm` was cleared:
 
 ```bash
 rim repair --stale-locks --dry-run
 rim repair --stale-locks
+rim repair --broken-links --dry-run
+rim repair --broken-links
+rim ensure
 ```
 
 Remove the current project's dependency directory and `node_modules` symlink:
@@ -286,7 +289,7 @@ Each layer also gets `.rim-meta.json` so `rim ls` and `rim gc` can reverse-map a
 
 While a wrapped command is running, `rim` writes `.rim-active` in the layer with the current pid and command. This is best-effort active protection: on Linux, `rim` treats `/proc/<pid>` as the source of truth. `rim clean` refuses active layers by default, and `rim gc` skips them. Use `--force` only when you are sure the process is gone or the lock is stale.
 
-If a process dies and leaves a stale lock, `rim doctor --suggest` reports it and `rim repair --stale-locks` removes only locks whose pid is no longer alive.
+If a process dies and leaves a stale lock, `rim doctor --suggest` reports it and `rim repair --stale-locks` removes only locks whose pid is no longer alive. If `/dev/shm` was cleared and the project still has a rim-managed `node_modules` symlink pointing at a missing layer, `rim doctor --suggest` reports it and `rim repair --broken-links` removes only that broken project link. Run `rim ensure` afterward to regenerate dependencies.
 
 Deno commands are special: `rim deno ...` creates only the dependency-layer metadata/cache root and does not create a `node_modules` symlink in the project.
 
@@ -709,7 +712,7 @@ Current suite:
 - `.rim-meta.json` stores manifest hash and pinned state
 - `.rim-active` marks layers currently running wrapped commands
 - `rim ls` shows ACTIVE as `no`, `pid:<pid>`, or `stale:<pid>`
-- `rim repair --stale-locks` removes stale `.rim-active` files and leaves live locks alone
+- `rim repair --stale-locks` / `rim repair --broken-links` removes stale `.rim-active` files and leaves live locks alone
 - `rim pin` / `rim unpin` toggle GC protection
 - `rim gc --dry-run --orphaned` previews orphaned layer cleanup
 - `rim gc --orphaned` removes orphaned layers
@@ -741,7 +744,7 @@ Current suite:
 - Active-lock protection is best-effort and based on `/proc/<pid>` on Linux/WSL; PID reuse is theoretically possible.
 - `--force` overrides active-lock protection. Use it only for confirmed stale locks or emergency cleanup.
 - Keeping the repo public is fine for rim itself, but never publish `.rim-backups/` unless you have reviewed the dependency diffs inside.
-- Restarting clears `/dev/shm`; run `rim npm install` again to recreate dependencies.
+- Restarting clears `/dev/shm`; run `rim repair --broken-links` if the project link is broken, then `rim ensure` to recreate dependencies.
 - For long-lived or heavy projects on tiny machines, consider `RIM_BASE=$HOME/.cache/rim` or an external drive.
 - `--ephemeral` auto-installs only for package-manager `run`, `test`, and `start` commands for now.
 - Manager shortcuts are intentionally simple: packageManager wins first, then Bun lockfiles, then npm, then pnpm experimental.
