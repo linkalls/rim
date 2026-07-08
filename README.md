@@ -20,6 +20,10 @@ Implemented:
 - `rim status`
 - `rim doctor`
 - `rim doctor --suggest`
+- `rim scan`
+- `rim adopt`
+- `rim adopt --diff-backup`
+- `rim backup list/show/restore`
 - `rim ls`
 - `rim gc`
 - `rim pin` / `rim unpin`
@@ -42,6 +46,8 @@ Implemented:
 - generated lockfiles are copied back to the real project after successful install-like commands
 - Deno commands skip the project `node_modules` symlink and only redirect cache/env paths
 - `.rim-meta.json` is written into each dependency layer for `rim ls` / `rim gc`, with manifest hash and pinned state
+- existing unmanaged `node_modules` can be scanned and safely adopted into a rim layer
+- optional diff backups compare existing `node_modules` against a fresh install before adoption
 - `bunfig.toml` is copied into the shadow project for Bun installs
 
 No external Rust dependencies are used.
@@ -131,6 +137,25 @@ rim gc --dry-run --all --include-pinned
 ```
 
 `rim gc` with no selector is safe by default: it behaves like `rim gc --dry-run --orphaned`.
+
+Find unmanaged `node_modules` directories and adopt one safely:
+
+```bash
+rim scan ~/code
+rim scan --json ~/code
+rim adopt ~/code/tiny-hono --dry-run
+rim adopt ~/code/tiny-hono
+rim adopt ~/code/tiny-hono --diff-backup
+```
+
+Manage diff backups created by `--diff-backup`:
+
+```bash
+rim backup list
+rim backup show latest
+rim backup restore latest --dry-run
+rim backup restore latest
+```
 
 Remove the current project's dependency directory and `node_modules` symlink:
 
@@ -302,6 +327,77 @@ BUN_INSTALL_CACHE_DIR=<rim-dir>/bun-cache
 `rim` can still run arbitrary commands, but pnpm is not a recommended target for the RAM/tmpfs mode. Its store model showed large RAM overhead in benchmarking, so pnpm is treated as experimental/opt-in rather than part of the main support path.
 
 After successful npm/bun install-like commands, `rim` trims the package-manager cache directory by default. The installed `node_modules` dependency tree remains. Use `--keep-cache` if you prefer faster repeated installs over minimum RAM usage.
+
+## Scanning and adopting existing node_modules
+
+`rim scan` searches for unmanaged `node_modules` directories under one or more paths:
+
+```bash
+rim scan ~/code
+rim scan ~/code ~/Downloads
+rim scan --json ~/code
+```
+
+It skips obvious junk directories such as `.git`, `.rim-backups`, `target`, `dist`, `build`, and it does not recurse inside `node_modules`. Each candidate reports the project path, size, inferred manager, risk, action, and warnings:
+
+```txt
+PROJECT                         SIZE      MANAGER  RISK    ACTION     WARNINGS
+~/code/tiny-hono                18.3 MB   bun      low     adoptable
+~/code/next-test                550 MB    npm      medium  review     heavy packages detected: next
+~/code/pnpm-mono                2.8 GB    pnpm     high    skip       pnpm store layout is high-risk for adopt
+```
+
+`rim adopt <project>` moves an existing real `node_modules` directory into the current `RIM_BASE` layer and replaces the project copy with a symlink:
+
+```bash
+rim adopt ~/code/tiny-hono --dry-run
+rim adopt ~/code/tiny-hono
+```
+
+High-risk candidates are refused by default. pnpm, workspaces, symlinked/broken `node_modules`, and projects without `package.json` are high-risk. Use `--allow-risk` only after reviewing the warnings:
+
+```bash
+rim adopt ~/code/pnpm-mono --allow-risk
+```
+
+Adopting into `/dev/shm` is intentionally loud: adopted `node_modules` will disappear on reboot. This is fine for reproducible dependencies, but unsafe for hand-edited `node_modules` unless you keep the layer on disk or save a delta backup.
+
+Prefer one of these before adopting anything you cannot regenerate:
+
+```bash
+RIM_PROFILE=cache rim adopt ~/code/app
+RIM_PROFILE=external rim adopt ~/code/app
+rim adopt ~/code/app --diff-backup
+```
+
+`rim adopt --diff-backup` creates a scratch fresh install from the same manifest/lockfile, compares it against the existing `node_modules`, and stores only the delta under `.rim-backups/`:
+
+```txt
+.rim-backups/
+  node_modules-delta-<timestamp>/
+    metadata.json
+    summary.txt
+    changed/node_modules/...
+    added/node_modules/...
+    binary/node_modules/...
+    deleted.json
+    symlinks.json
+```
+
+The comparison is not a proof of manual edits. Lifecycle scripts, native packages, generated files, and lockfile-free projects can create differences that are not hand patches. It is still much safer than blindly moving a hand-modified `node_modules` into tmpfs.
+
+Restore delta files later with:
+
+```bash
+rim backup list
+rim backup show latest
+rim backup restore latest --dry-run
+rim backup restore latest
+```
+
+Restore applies `changed/`, `added/`, and `binary/` files. `deleted.json` is shown but not applied unless `--apply-deletes` is passed.
+
+`rim scan --diff <project>` can run the fresh-install comparison without adopting. For now it requires exactly one unmanaged candidate.
 
 ## Layer inventory and garbage collection
 
@@ -509,6 +605,15 @@ Current suite:
 - `--ephemeral` auto-installs missing dependencies for run/test/start commands and cleans afterward
 - install-like commands warn when `RIM_BASE` is low on space
 - install-like commands with `--auto-clean` warn that dependencies will be removed while manifest changes remain
+- `rim scan` detects unmanaged `node_modules` candidates and classifies risk/action
+- `rim scan --json` emits script-readable candidate data
+- rim-managed `node_modules` symlinks are reported as managed/skip candidates
+- `rim adopt --dry-run` makes no project changes
+- `rim adopt` moves a real `node_modules` into a rim layer and leaves a symlink
+- high-risk adopt is refused unless `--allow-risk` is passed
+- `rim adopt --diff-backup` saves changed/added/binary deltas under `.rim-backups`
+- `rim backup list/show/restore` manages delta backups
+- backup restore dry-runs without writing and restores changed/added/binary files by default
 - `.rim-meta.json` powers `rim ls` and metadata-based `rim gc`
 - `.rim-meta.json` stores manifest hash and pinned state
 - `rim pin` / `rim unpin` toggle GC protection
@@ -536,6 +641,7 @@ Current suite:
 
 - Linux-first. `/dev/shm` is the default because the main target is small Linux boxes and disposable dependency state.
 - RAM/tmpfs is finite; large Playwright/Next/Expo/Electron installs can still blow up `/dev/shm`.
+- Do not store hand-edited `node_modules` only in tmpfs. If `RIM_BASE` is `/dev/shm/rim`, adopted dependencies disappear on reboot; use `--diff-backup`, `RIM_PROFILE=cache`, or `RIM_PROFILE=external`.
 - Restarting clears `/dev/shm`; run `rim npm install` again to recreate dependencies.
 - For long-lived or heavy projects on tiny machines, consider `RIM_BASE=$HOME/.cache/rim` or an external drive.
 - `--ephemeral` auto-installs only for package-manager `run`, `test`, and `start` commands for now.

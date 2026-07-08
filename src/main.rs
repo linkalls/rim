@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::ffi::OsString;
@@ -89,6 +90,18 @@ fn run() -> Result<u8, String> {
             let clean_args = args.split_off(1);
             clean_command(&ctx, &clean_args)
         }
+        "scan" => {
+            let scan_args = args.split_off(1);
+            scan_command(&ctx, &scan_args)
+        }
+        "adopt" => {
+            let adopt_args = args.split_off(1);
+            adopt_command(&ctx, &adopt_args, options)
+        }
+        "backup" => {
+            let backup_args = args.split_off(1);
+            backup_command(&ctx, &backup_args)
+        }
         "ensure" => {
             let ensure_args = args.split_off(1);
             ensure_command(&ctx, &ensure_args, options)
@@ -165,6 +178,9 @@ Usage:
   rim status
   rim doctor [--suggest]
   rim clean [--cache-only|--deps-only]
+  rim scan [--json|--diff] <path>...
+  rim adopt <project> [--dry-run] [--allow-risk] [--diff-backup]
+  rim backup list|show|restore <id|latest> [--dry-run] [--apply-deletes]
   rim ensure [bun|npm|pnpm]
   rim pin|unpin
   rim manager
@@ -208,6 +224,10 @@ fn build_context() -> Result<RimContext, String> {
     let cwd = env::current_dir().map_err(|e| format!("cannot read cwd: {e}"))?;
     let project_root = find_project_root(&cwd);
     let base = resolve_rim_base()?;
+    Ok(build_context_for_project(project_root, base))
+}
+
+fn build_context_for_project(project_root: PathBuf, base: PathBuf) -> RimContext {
     let name = project_root
         .file_name()
         .and_then(|s| s.to_str())
@@ -216,7 +236,7 @@ fn build_context() -> Result<RimContext, String> {
     let rim_dir = base.join(format!("{name}-{hash}"));
     let shadow_project = rim_dir.join("project");
 
-    Ok(RimContext {
+    RimContext {
         project_root,
         rim_base: base,
         node_modules: shadow_project.join("node_modules"),
@@ -229,7 +249,7 @@ fn build_context() -> Result<RimContext, String> {
         pnpm_store: rim_dir.join("pnpm-store"),
         shadow_project,
         rim_dir,
-    })
+    }
 }
 
 fn find_project_root(start: &Path) -> PathBuf {
@@ -874,6 +894,1039 @@ fn manager_command(ctx: &RimContext) -> Result<u8, String> {
     println!("detected: {}", detection.manager);
     println!("reason: {}", detection.reason);
     Ok(0)
+}
+
+#[derive(Debug, Clone)]
+struct ScanCandidate {
+    project_root: PathBuf,
+    node_modules: PathBuf,
+    size_bytes: u64,
+    manager: String,
+    risk: String,
+    action: String,
+    warnings: Vec<String>,
+    managed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct TreeEntry {
+    kind: String,
+    size: u64,
+    hash: Option<String>,
+    link_target: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DiffCounts {
+    changed: u64,
+    added: u64,
+    deleted: u64,
+    type_changed: u64,
+    binary: u64,
+}
+
+fn scan_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
+    let mut json = false;
+    let mut diff = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.to_str() {
+            Some("--json") => json = true,
+            Some("--diff") => diff = true,
+            Some(path) => paths.push(expand_tilde(path)),
+            None => return Err("scan arguments must be valid UTF-8".to_owned()),
+        }
+    }
+    if paths.is_empty() {
+        paths.push(env::current_dir().map_err(|e| format!("cannot read cwd: {e}"))?);
+    }
+
+    let mut candidates = Vec::new();
+    for path in paths {
+        scan_path(ctx, &path, &mut candidates)?;
+    }
+
+    if diff {
+        let unmanaged = candidates
+            .iter()
+            .filter(|candidate| !candidate.managed)
+            .collect::<Vec<_>>();
+        if unmanaged.len() != 1 {
+            return Err(format!(
+                "rim scan --diff requires exactly one unmanaged candidate; found {}. Pass a specific project path.",
+                unmanaged.len()
+            ));
+        }
+        let candidate = unmanaged[0];
+        let diff = compare_with_fresh_install(ctx, candidate, false, true)?;
+        if json {
+            print_scan_json(&candidates, Some(&diff));
+        } else {
+            print_scan_table(&candidates);
+            println!(
+                "manual_diff: {}",
+                if diff.has_changes() {
+                    "detected"
+                } else {
+                    "none"
+                }
+            );
+            println!(
+                "diff_summary: changed={} added={} deleted={} type_changed={} binary={}",
+                diff.changed, diff.added, diff.deleted, diff.type_changed, diff.binary
+            );
+        }
+        return Ok(0);
+    }
+
+    if json {
+        print_scan_json(&candidates, None);
+    } else {
+        print_scan_table(&candidates);
+    }
+    Ok(0)
+}
+
+fn scan_path(ctx: &RimContext, root: &Path, out: &mut Vec<ScanCandidate>) -> Result<(), String> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == "node_modules" {
+                out.push(analyze_node_modules(ctx, &path));
+                continue;
+            }
+            if should_skip_scan_dir(&name) {
+                continue;
+            }
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                stack.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn should_skip_scan_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | ".rim-backups" | "target" | "dist" | "build" | ".next" | ".cache" | ".turbo"
+    )
+}
+
+fn analyze_node_modules(ctx: &RimContext, node_modules: &Path) -> ScanCandidate {
+    let project_root = node_modules
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let meta = fs::symlink_metadata(node_modules).ok();
+    let is_symlink = meta
+        .as_ref()
+        .is_some_and(|meta| meta.file_type().is_symlink());
+    let managed = is_symlink
+        && fs::read_link(node_modules)
+            .map(|target| target.starts_with(&ctx.rim_base))
+            .unwrap_or(false);
+    let size_bytes = if is_symlink {
+        0
+    } else {
+        dir_size(node_modules).unwrap_or(0)
+    };
+    let (manager, manager_warning) = infer_manager_for_project(&project_root, node_modules);
+    let mut warnings = Vec::new();
+    if let Some(warning) = manager_warning {
+        warnings.push(warning);
+    }
+    if managed {
+        warnings.push("already managed by rim".to_owned());
+    }
+    if is_symlink && !managed {
+        warnings.push("node_modules is a symlink".to_owned());
+    }
+    if !project_root.join("package.json").exists() {
+        warnings.push("package.json missing".to_owned());
+    }
+    if workspace_detected_in(&project_root) {
+        warnings.push("workspace detected".to_owned());
+    }
+    if lifecycle_scripts_detected_in(&project_root) {
+        warnings.push("lifecycle scripts detected".to_owned());
+    }
+    let heavy = risky_packages_in(&project_root);
+    if !heavy.is_empty() {
+        warnings.push(format!("heavy packages detected: {}", heavy.join(", ")));
+    }
+    if size_bytes > 512 * 1024 * 1024 {
+        warnings.push("large node_modules".to_owned());
+    }
+
+    let high = managed
+        || is_symlink
+        || !project_root.join("package.json").exists()
+        || manager == "pnpm"
+        || workspace_detected_in(&project_root);
+    let medium = manager == "unknown"
+        || manager == "yarn"
+        || !has_any_lockfile(&project_root)
+        || lifecycle_scripts_detected_in(&project_root)
+        || !heavy.is_empty()
+        || size_bytes > 512 * 1024 * 1024;
+    let risk = if high {
+        "high"
+    } else if medium {
+        "medium"
+    } else {
+        "low"
+    }
+    .to_owned();
+    let action = if managed || risk == "high" {
+        "skip"
+    } else if risk == "medium" {
+        "review"
+    } else {
+        "adoptable"
+    }
+    .to_owned();
+
+    ScanCandidate {
+        project_root,
+        node_modules: node_modules.to_path_buf(),
+        size_bytes,
+        manager,
+        risk,
+        action,
+        warnings,
+        managed,
+    }
+}
+
+fn infer_manager_for_project(project_root: &Path, node_modules: &Path) -> (String, Option<String>) {
+    let package_json = fs::read_to_string(project_root.join("package.json")).unwrap_or_default();
+    if let Some(pm) = json_string_field(&package_json, "packageManager")
+        && let Some((manager, _version)) = pm.split_once('@')
+    {
+        return (manager.to_owned(), Some(format!("packageManager {pm}")));
+    }
+    if project_root.join("bun.lock").exists() || project_root.join("bun.lockb").exists() {
+        return ("bun".to_owned(), None);
+    }
+    if project_root.join("package-lock.json").exists()
+        || project_root.join("npm-shrinkwrap.json").exists()
+    {
+        return ("npm".to_owned(), None);
+    }
+    if project_root.join("pnpm-lock.yaml").exists() || node_modules.join(".modules.yaml").exists() {
+        return (
+            "pnpm".to_owned(),
+            Some("pnpm store layout is high-risk for adopt".to_owned()),
+        );
+    }
+    if project_root.join("yarn.lock").exists() {
+        return (
+            "yarn".to_owned(),
+            Some("yarn adopt is medium-risk".to_owned()),
+        );
+    }
+    if project_root.join("package.json").exists() {
+        return (
+            "unknown".to_owned(),
+            Some("package.json found but no lockfile".to_owned()),
+        );
+    }
+    (
+        "unknown".to_owned(),
+        Some("project root has no package.json".to_owned()),
+    )
+}
+
+fn print_scan_table(candidates: &[ScanCandidate]) {
+    println!(
+        "{:<36} {:>10} {:<8} {:<7} {:<10} WARNINGS",
+        "PROJECT", "SIZE", "MANAGER", "RISK", "ACTION"
+    );
+    for candidate in candidates {
+        println!(
+            "{:<36} {:>10} {:<8} {:<7} {:<10} {}",
+            shorten_project(&candidate.project_root.to_string_lossy()),
+            format_bytes(candidate.size_bytes),
+            candidate.manager,
+            candidate.risk,
+            candidate.action,
+            candidate.warnings.join("; ")
+        );
+    }
+}
+
+fn print_scan_json(candidates: &[ScanCandidate], diff: Option<&DiffCounts>) {
+    println!("[");
+    for (idx, candidate) in candidates.iter().enumerate() {
+        let comma = if idx + 1 == candidates.len() { "" } else { "," };
+        println!(
+            "  {{\"project\":\"{}\",\"node_modules\":\"{}\",\"size_bytes\":{},\"manager\":\"{}\",\"risk\":\"{}\",\"action\":\"{}\",\"managed\":{},\"warnings\":[{}]}}{}",
+            json_escape(&candidate.project_root.to_string_lossy()),
+            json_escape(&candidate.node_modules.to_string_lossy()),
+            candidate.size_bytes,
+            json_escape(&candidate.manager),
+            candidate.risk,
+            candidate.action,
+            candidate.managed,
+            candidate
+                .warnings
+                .iter()
+                .map(|w| format!("\"{}\"", json_escape(w)))
+                .collect::<Vec<_>>()
+                .join(","),
+            comma
+        );
+    }
+    println!("]");
+    if let Some(diff) = diff {
+        eprintln!(
+            "manual_diff={}",
+            if diff.has_changes() {
+                "detected"
+            } else {
+                "none"
+            }
+        );
+    }
+}
+
+fn adopt_command(
+    base_ctx: &RimContext,
+    args: &[OsString],
+    global_options: CliOptions,
+) -> Result<u8, String> {
+    let mut dry_run = global_options.dry_run;
+    let mut allow_risk = false;
+    let mut diff_backup = false;
+    let mut project_arg: Option<PathBuf> = None;
+    for arg in args {
+        match arg.to_str() {
+            Some("--dry-run") => dry_run = true,
+            Some("--allow-risk") => allow_risk = true,
+            Some("--diff-backup") => diff_backup = true,
+            Some(path) if project_arg.is_none() => project_arg = Some(expand_tilde(path)),
+            Some(other) => return Err(format!("unknown adopt option or extra path: {other}")),
+            None => return Err("adopt arguments must be valid UTF-8".to_owned()),
+        }
+    }
+    let Some(project_arg) = project_arg else {
+        return Err("rim adopt requires a project path".to_owned());
+    };
+    let project_root = find_project_root(&project_arg);
+    let ctx = build_context_for_project(project_root.clone(), base_ctx.rim_base.clone());
+    let node_modules = project_root.join("node_modules");
+    let candidate = analyze_node_modules(&ctx, &node_modules);
+    print_adopt_plan(&ctx, &candidate, dry_run, diff_backup);
+
+    if candidate.managed {
+        return Err("node_modules is already managed by rim".to_owned());
+    }
+    if candidate.risk == "high" && !allow_risk {
+        return Err(
+            "high-risk adopt refused; pass --allow-risk after reviewing warnings".to_owned(),
+        );
+    }
+    let meta = fs::symlink_metadata(&node_modules)
+        .map_err(|_| format!("{} does not exist", node_modules.display()))?;
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return Err(
+            "adopt requires a real node_modules directory, not a symlink or file".to_owned(),
+        );
+    }
+    if dry_run {
+        return Ok(0);
+    }
+
+    if diff_backup {
+        create_diff_backup(&ctx, &candidate, allow_risk)?;
+    }
+
+    fs::create_dir_all(&ctx.shadow_project)
+        .map_err(|e| format!("cannot create shadow project: {e}"))?;
+    if ctx.node_modules.exists() {
+        return Err(format!(
+            "target layer already has node_modules: {}",
+            ctx.node_modules.display()
+        ));
+    }
+    move_dir_cross_device(&node_modules, &ctx.node_modules)?;
+    symlink(&ctx.node_modules, &node_modules)
+        .map_err(|e| format!("cannot create node_modules symlink: {e}"))?;
+    write_adopt_meta(&ctx, &candidate.manager)?;
+    println!(
+        "adopted: {} -> {}",
+        node_modules.display(),
+        ctx.node_modules.display()
+    );
+    Ok(0)
+}
+
+fn print_adopt_plan(ctx: &RimContext, candidate: &ScanCandidate, dry_run: bool, diff_backup: bool) {
+    println!("project: {}", candidate.project_root.display());
+    println!("node_modules: {}", candidate.node_modules.display());
+    println!("rim_dir: {}", ctx.rim_dir.display());
+    println!("manager: {}", candidate.manager);
+    println!("risk: {}", candidate.risk);
+    println!("action: {}", candidate.action);
+    if dry_run {
+        println!("dry_run: true");
+    }
+    if diff_backup {
+        println!("diff_backup: enabled");
+    }
+    for warning in &candidate.warnings {
+        eprintln!("rim: warning: {warning}");
+    }
+    if rim_mode(ctx) == "tmpfs" {
+        eprintln!(
+            "rim: warning: adopting into tmpfs; adopted node_modules will disappear on reboot."
+        );
+        eprintln!(
+            "rim: warning: use --diff-backup, RIM_PROFILE=cache, or RIM_PROFILE=external for hand-edited node_modules."
+        );
+    }
+    eprintln!(
+        "rim: warning: manual node_modules edits cannot be fully detected without --diff-backup."
+    );
+}
+
+fn write_adopt_meta(ctx: &RimContext, manager: &str) -> Result<(), String> {
+    let now = now_unix();
+    let contents = format!(
+        "{{\n  \"schema_version\": 1,\n  \"project_root\": \"{}\",\n  \"created_at\": {},\n  \"last_used_at\": {},\n  \"manager\": \"{}\",\n  \"mode\": \"{}\",\n  \"rim_version\": \"{}\",\n  \"manifest_hash\": \"{}\",\n  \"pinned\": false,\n  \"adopted\": true,\n  \"adopted_at\": {},\n  \"adopt_method\": \"move-existing-node_modules\"\n}}\n",
+        json_escape(&ctx.project_root.to_string_lossy()),
+        now,
+        now,
+        json_escape(manager),
+        json_escape(&rim_mode(ctx)),
+        json_escape(env!("CARGO_PKG_VERSION")),
+        manifest_hash(ctx),
+        now
+    );
+    fs::write(ctx.rim_dir.join(".rim-meta.json.tmp"), contents)
+        .map_err(|e| format!("cannot write rim metadata: {e}"))?;
+    fs::rename(
+        ctx.rim_dir.join(".rim-meta.json.tmp"),
+        ctx.rim_dir.join(".rim-meta.json"),
+    )
+    .map_err(|e| format!("cannot replace rim metadata: {e}"))
+}
+
+fn create_diff_backup(
+    ctx: &RimContext,
+    candidate: &ScanCandidate,
+    allow_risk: bool,
+) -> Result<Option<PathBuf>, String> {
+    if candidate.manager == "pnpm" && !allow_risk {
+        return Err("diff-backup for pnpm requires --allow-risk".to_owned());
+    }
+    if !matches!(candidate.manager.as_str(), "npm" | "bun" | "pnpm" | "yarn") {
+        return Err("diff-backup requires npm, bun, pnpm, or yarn manager detection".to_owned());
+    }
+    let scratch = ctx.rim_dir.join(format!("adopt-scratch-{}", now_unix()));
+    if scratch.exists() {
+        fs::remove_dir_all(&scratch).map_err(|e| format!("cannot clear scratch: {e}"))?;
+    }
+    fs::create_dir_all(&scratch).map_err(|e| format!("cannot create scratch: {e}"))?;
+    for name in manifest_names() {
+        let src = ctx.project_root.join(name);
+        if src.exists() {
+            fs::copy(&src, scratch.join(name))
+                .map_err(|e| format!("cannot copy manifest {} to scratch: {e}", src.display()))?;
+        }
+    }
+    run_pristine_install(&candidate.manager, &scratch, ctx)?;
+    let pristine = scratch.join("node_modules");
+    if !pristine.exists() {
+        let _ = fs::remove_dir_all(&scratch);
+        return Err("fresh install did not create scratch node_modules".to_owned());
+    }
+    let backup = backup_root(ctx).join(format!("node_modules-delta-{}", now_unix()));
+    fs::create_dir_all(&backup).map_err(|e| format!("cannot create backup dir: {e}"))?;
+    let diff = diff_trees(&candidate.node_modules, &pristine, &backup)?;
+    write_backup_metadata(ctx, &backup, &candidate.manager, &diff)?;
+    let _ = fs::remove_dir_all(&scratch);
+    println!("diff_backup: {}", backup.display());
+    Ok(Some(backup))
+}
+
+fn compare_with_fresh_install(
+    ctx: &RimContext,
+    candidate: &ScanCandidate,
+    allow_risk: bool,
+    cleanup: bool,
+) -> Result<DiffCounts, String> {
+    if candidate.manager == "pnpm" && !allow_risk {
+        return Err(
+            "scan --diff for pnpm requires --allow-risk via adopt; use a specific low-risk project"
+                .to_owned(),
+        );
+    }
+    let scratch = ctx
+        .rim_dir
+        .join(format!("scan-diff-scratch-{}", now_unix()));
+    fs::create_dir_all(&scratch).map_err(|e| format!("cannot create scratch: {e}"))?;
+    for name in manifest_names() {
+        let src = candidate.project_root.join(name);
+        if src.exists() {
+            fs::copy(&src, scratch.join(name))
+                .map_err(|e| format!("cannot copy manifest {} to scratch: {e}", src.display()))?;
+        }
+    }
+    run_pristine_install(&candidate.manager, &scratch, ctx)?;
+    let backup = scratch.join("diff-output");
+    fs::create_dir_all(&backup).map_err(|e| format!("cannot create diff output: {e}"))?;
+    let diff = diff_trees(
+        &candidate.node_modules,
+        &scratch.join("node_modules"),
+        &backup,
+    )?;
+    if cleanup {
+        let _ = fs::remove_dir_all(&scratch);
+    }
+    Ok(diff)
+}
+
+fn run_pristine_install(manager: &str, cwd: &Path, ctx: &RimContext) -> Result<(), String> {
+    let (tool, args): (&str, Vec<&str>) = match manager {
+        "npm" => (
+            "npm",
+            vec!["install", "--ignore-scripts", "--no-audit", "--no-fund"],
+        ),
+        "bun" => ("bun", vec!["install", "--ignore-scripts"]),
+        "pnpm" => ("pnpm", vec!["install", "--ignore-scripts"]),
+        "yarn" => ("yarn", vec!["install", "--ignore-scripts"]),
+        other => return Err(format!("unsupported manager for diff-backup: {other}")),
+    };
+    let status = Command::new(tool)
+        .args(args)
+        .current_dir(cwd)
+        .env(
+            "npm_config_cache",
+            ctx.rim_dir.join("adopt-pristine-npm-cache"),
+        )
+        .env(
+            "BUN_INSTALL_CACHE_DIR",
+            ctx.rim_dir.join("adopt-pristine-bun-cache"),
+        )
+        .status()
+        .map_err(|e| format!("failed to run pristine install with {tool}: {e}"))?;
+    if !status.success() {
+        return Err(format!("pristine install failed with {tool}"));
+    }
+    Ok(())
+}
+
+fn diff_trees(existing: &Path, pristine: &Path, backup: &Path) -> Result<DiffCounts, String> {
+    let existing_map = snapshot_tree(existing)?;
+    let pristine_map = snapshot_tree(pristine)?;
+    let mut diff = DiffCounts::default();
+    let mut deleted = Vec::new();
+    let mut symlinks = Vec::new();
+
+    for (rel, entry) in &existing_map {
+        match pristine_map.get(rel) {
+            None => {
+                diff.added += 1;
+                copy_backup_item(existing, rel, entry, &backup.join("added"))?;
+            }
+            Some(base) if entry.kind != base.kind => {
+                diff.type_changed += 1;
+                copy_backup_item(existing, rel, entry, &backup.join("changed"))?;
+            }
+            Some(base)
+                if entry.hash != base.hash
+                    || entry.link_target != base.link_target
+                    || entry.size != base.size =>
+            {
+                if entry.kind == "symlink" {
+                    symlinks.push(format!(
+                        "{{\"path\":\"node_modules/{}\",\"target\":\"{}\"}}",
+                        json_escape(rel),
+                        json_escape(entry.link_target.as_deref().unwrap_or(""))
+                    ));
+                    diff.changed += 1;
+                } else if is_binary_or_large(&existing.join(rel)) {
+                    diff.binary += 1;
+                    copy_backup_item(existing, rel, entry, &backup.join("binary"))?;
+                } else {
+                    diff.changed += 1;
+                    copy_backup_item(existing, rel, entry, &backup.join("changed"))?;
+                }
+            }
+            _ => {}
+        }
+    }
+    for rel in pristine_map.keys() {
+        if !existing_map.contains_key(rel) {
+            diff.deleted += 1;
+            deleted.push(format!("\"node_modules/{}\"", json_escape(rel)));
+        }
+    }
+    fs::write(
+        backup.join("deleted.json"),
+        format!("[{}]\n", deleted.join(",")),
+    )
+    .map_err(|e| format!("cannot write deleted.json: {e}"))?;
+    fs::write(
+        backup.join("symlinks.json"),
+        format!("[{}]\n", symlinks.join(",")),
+    )
+    .map_err(|e| format!("cannot write symlinks.json: {e}"))?;
+    Ok(diff)
+}
+
+fn snapshot_tree(root: &Path) -> Result<BTreeMap<String, TreeEntry>, String> {
+    let mut map = BTreeMap::new();
+    if !root.exists() {
+        return Ok(map);
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        for entry in
+            fs::read_dir(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?
+        {
+            let entry = entry.map_err(|e| format!("cannot read dir entry: {e}"))?;
+            let child = entry.path();
+            let rel = child
+                .strip_prefix(root)
+                .unwrap_or(&child)
+                .to_string_lossy()
+                .to_string();
+            let meta = fs::symlink_metadata(&child)
+                .map_err(|e| format!("cannot stat {}: {e}", child.display()))?;
+            let file_type = meta.file_type();
+            if file_type.is_symlink() {
+                map.insert(
+                    rel,
+                    TreeEntry {
+                        kind: "symlink".to_owned(),
+                        size: meta.len(),
+                        hash: None,
+                        link_target: fs::read_link(&child)
+                            .ok()
+                            .map(|p| p.to_string_lossy().to_string()),
+                    },
+                );
+            } else if meta.is_dir() {
+                map.insert(
+                    rel,
+                    TreeEntry {
+                        kind: "dir".to_owned(),
+                        size: meta.len(),
+                        hash: None,
+                        link_target: None,
+                    },
+                );
+                stack.push(child);
+            } else if meta.is_file() {
+                map.insert(
+                    rel,
+                    TreeEntry {
+                        kind: "file".to_owned(),
+                        size: meta.len(),
+                        hash: Some(file_hash(&child)?),
+                        link_target: None,
+                    },
+                );
+            }
+        }
+    }
+    Ok(map)
+}
+
+fn file_hash(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Ok(format!("{:016x}", hasher.finish()))
+}
+
+fn copy_backup_item(
+    root: &Path,
+    rel: &str,
+    entry: &TreeEntry,
+    dst_root: &Path,
+) -> Result<(), String> {
+    if entry.kind == "dir" {
+        return Ok(());
+    }
+    let src = root.join(rel);
+    let dst = dst_root.join("node_modules").join(rel);
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create backup parent {}: {e}", parent.display()))?;
+    }
+    if entry.kind == "symlink" {
+        if let Some(target) = &entry.link_target {
+            symlink(target, &dst)
+                .map_err(|e| format!("cannot backup symlink {}: {e}", dst.display()))?;
+        }
+    } else {
+        fs::copy(&src, &dst)
+            .map_err(|e| format!("cannot copy backup item {}: {e}", src.display()))?;
+    }
+    Ok(())
+}
+
+fn is_binary_or_large(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() > 1024 * 1024 {
+        return true;
+    }
+    let Ok(bytes) = fs::read(path) else {
+        return true;
+    };
+    std::str::from_utf8(&bytes).is_err()
+}
+
+fn write_backup_metadata(
+    ctx: &RimContext,
+    backup: &Path,
+    manager: &str,
+    diff: &DiffCounts,
+) -> Result<(), String> {
+    let metadata = format!(
+        "{{\n  \"schema_version\": 1,\n  \"project_root\": \"{}\",\n  \"manager\": \"{}\",\n  \"created_at\": {},\n  \"baseline_method\": \"fresh-install\",\n  \"manifest_hash\": \"{}\",\n  \"differences\": {{\"changed\": {}, \"added\": {}, \"deleted\": {}, \"type_changed\": {}, \"binary\": {}}}\n}}\n",
+        json_escape(&ctx.project_root.to_string_lossy()),
+        json_escape(manager),
+        now_unix(),
+        manifest_hash(ctx),
+        diff.changed,
+        diff.added,
+        diff.deleted,
+        diff.type_changed,
+        diff.binary
+    );
+    fs::write(backup.join("metadata.json"), metadata)
+        .map_err(|e| format!("cannot write backup metadata: {e}"))?;
+    fs::write(
+        backup.join("summary.txt"),
+        format!(
+            "changed: {}\nadded: {}\ndeleted: {}\ntype_changed: {}\nbinary: {}\n",
+            diff.changed, diff.added, diff.deleted, diff.type_changed, diff.binary
+        ),
+    )
+    .map_err(|e| format!("cannot write backup summary: {e}"))?;
+    Ok(())
+}
+
+impl DiffCounts {
+    fn has_changes(&self) -> bool {
+        self.changed + self.added + self.deleted + self.type_changed + self.binary > 0
+    }
+}
+
+fn backup_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
+    let Some(sub) = args.first().and_then(|arg| arg.to_str()) else {
+        return Err("rim backup requires list, show, or restore".to_owned());
+    };
+    match sub {
+        "list" => backup_list(ctx),
+        "show" => {
+            let id = args.get(1).and_then(|arg| arg.to_str()).unwrap_or("latest");
+            let backup = resolve_backup(ctx, id)?;
+            print_backup(&backup)?;
+            Ok(0)
+        }
+        "restore" => backup_restore(ctx, &args[1..]),
+        other => Err(format!("unknown backup command: {other}")),
+    }
+}
+
+fn backup_root(ctx: &RimContext) -> PathBuf {
+    ctx.project_root.join(".rim-backups")
+}
+
+fn backup_list(ctx: &RimContext) -> Result<u8, String> {
+    let mut backups = list_backups(ctx)?;
+    backups.sort();
+    for backup in backups {
+        println!(
+            "{}",
+            backup
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+        );
+    }
+    Ok(0)
+}
+
+fn list_backups(ctx: &RimContext) -> Result<Vec<PathBuf>, String> {
+    let root = backup_root(ctx);
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    Ok(fs::read_dir(root)
+        .map_err(|e| format!("cannot read backup dir: {e}"))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect())
+}
+
+fn resolve_backup(ctx: &RimContext, id: &str) -> Result<PathBuf, String> {
+    if id == "latest" {
+        let mut backups = list_backups(ctx)?;
+        backups.sort();
+        return backups
+            .pop()
+            .ok_or_else(|| "no rim backups found".to_owned());
+    }
+    let backup = backup_root(ctx).join(id);
+    if backup.exists() {
+        Ok(backup)
+    } else {
+        Err(format!("backup not found: {id}"))
+    }
+}
+
+fn print_backup(backup: &Path) -> Result<(), String> {
+    println!("backup: {}", backup.display());
+    let summary = backup.join("summary.txt");
+    if summary.exists() {
+        print!(
+            "{}",
+            fs::read_to_string(summary).map_err(|e| format!("cannot read summary: {e}"))?
+        );
+    }
+    Ok(())
+}
+
+fn backup_restore(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
+    let mut id = "latest";
+    let mut dry_run = false;
+    let mut apply_deletes = false;
+    for arg in args {
+        match arg.to_str() {
+            Some("--dry-run") => dry_run = true,
+            Some("--apply-deletes") => apply_deletes = true,
+            Some(value) => id = value,
+            None => return Err("backup restore args must be valid UTF-8".to_owned()),
+        }
+    }
+    let backup = resolve_backup(ctx, id)?;
+    let node_modules = ctx.project_root.join("node_modules");
+    if !node_modules.exists() {
+        return Err("backup restore requires current project node_modules to exist".to_owned());
+    }
+    for category in ["changed", "added", "binary"] {
+        let src = backup.join(category).join("node_modules");
+        if src.exists() {
+            restore_tree(&src, &node_modules, dry_run)?;
+        }
+    }
+    if apply_deletes {
+        apply_deleted_entries(&backup, &node_modules, dry_run)?;
+    } else if backup.join("deleted.json").exists() {
+        println!(
+            "deleted entries are listed in {}; pass --apply-deletes to remove them",
+            backup.join("deleted.json").display()
+        );
+    }
+    println!(
+        "restore: {}{}",
+        backup.display(),
+        if dry_run { " (dry-run)" } else { "" }
+    );
+    Ok(0)
+}
+
+fn restore_tree(src_root: &Path, dst_root: &Path, dry_run: bool) -> Result<(), String> {
+    let mut stack = vec![src_root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        for entry in fs::read_dir(&path).map_err(|e| format!("cannot read restore tree: {e}"))? {
+            let entry = entry.map_err(|e| format!("cannot read restore entry: {e}"))?;
+            let src = entry.path();
+            let rel = src.strip_prefix(src_root).unwrap_or(&src);
+            let dst = dst_root.join(rel);
+            let meta =
+                fs::symlink_metadata(&src).map_err(|e| format!("cannot stat restore item: {e}"))?;
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                stack.push(src);
+            } else {
+                println!("restore file: {}", dst.display());
+                if !dry_run {
+                    if let Some(parent) = dst.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|e| format!("cannot create restore parent: {e}"))?;
+                    }
+                    if meta.file_type().is_symlink() {
+                        let target = fs::read_link(&src)
+                            .map_err(|e| format!("cannot read backup symlink: {e}"))?;
+                        let _ = fs::remove_file(&dst);
+                        symlink(target, dst).map_err(|e| format!("cannot restore symlink: {e}"))?;
+                    } else {
+                        fs::copy(&src, &dst)
+                            .map_err(|e| format!("cannot restore file {}: {e}", dst.display()))?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_deleted_entries(backup: &Path, node_modules: &Path, dry_run: bool) -> Result<(), String> {
+    let path = backup.join("deleted.json");
+    if !path.exists() {
+        return Ok(());
+    }
+    let contents =
+        fs::read_to_string(path).map_err(|e| format!("cannot read deleted.json: {e}"))?;
+    for item in parse_json_string_array(&contents) {
+        if let Some(rest) = item.strip_prefix("node_modules/") {
+            let target = node_modules.join(rest);
+            println!("delete: {}", target.display());
+            if !dry_run && target.exists() {
+                if target.is_dir() && !target.is_symlink() {
+                    fs::remove_dir_all(&target)
+                        .map_err(|e| format!("cannot delete {}: {e}", target.display()))?;
+                } else {
+                    fs::remove_file(&target)
+                        .map_err(|e| format!("cannot delete {}: {e}", target.display()))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_json_string_array(contents: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut chars = contents.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            let mut value = String::new();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '"' => break,
+                    '\\' => {
+                        if let Some(next) = chars.next() {
+                            value.push(next);
+                        }
+                    }
+                    other => value.push(other),
+                }
+            }
+            values.push(value);
+        }
+    }
+    values
+}
+
+fn move_dir_cross_device(src: &Path, dst: &Path) -> Result<(), String> {
+    match fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            copy_dir_recursive(src, dst)?;
+            fs::remove_dir_all(src)
+                .map_err(|e| format!("cannot remove original {} after copy: {e}", src.display()))
+        }
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| format!("cannot create {}: {e}", dst.display()))?;
+    for entry in fs::read_dir(src).map_err(|e| format!("cannot read {}: {e}", src.display()))? {
+        let entry = entry.map_err(|e| format!("cannot read dir entry: {e}"))?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        let meta = fs::symlink_metadata(&from)
+            .map_err(|e| format!("cannot stat {}: {e}", from.display()))?;
+        if meta.file_type().is_symlink() {
+            let target = fs::read_link(&from)
+                .map_err(|e| format!("cannot read symlink {}: {e}", from.display()))?;
+            symlink(target, to).map_err(|e| format!("cannot copy symlink: {e}"))?;
+        } else if meta.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            fs::copy(&from, &to).map_err(|e| format!("cannot copy {}: {e}", from.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if path == "~"
+        && let Some(home) = env::var_os("HOME")
+    {
+        return PathBuf::from(home);
+    }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    PathBuf::from(path)
+}
+
+fn has_any_lockfile(project_root: &Path) -> bool {
+    [
+        "bun.lock",
+        "bun.lockb",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+    ]
+    .iter()
+    .any(|name| project_root.join(name).exists())
+}
+
+fn workspace_detected_in(project_root: &Path) -> bool {
+    project_root.join("pnpm-workspace.yaml").exists()
+        || project_root.join("turbo.json").exists()
+        || project_root.join("rush.json").exists()
+        || project_root.join("lerna.json").exists()
+        || fs::read_to_string(project_root.join("package.json"))
+            .map(|contents| contents.contains("\"workspaces\""))
+            .unwrap_or(false)
+}
+
+fn lifecycle_scripts_detected_in(project_root: &Path) -> bool {
+    fs::read_to_string(project_root.join("package.json"))
+        .map(|contents| {
+            [
+                "\"preinstall\"",
+                "\"install\"",
+                "\"postinstall\"",
+                "\"prepare\"",
+            ]
+            .iter()
+            .any(|needle| contents.contains(needle))
+        })
+        .unwrap_or(false)
+}
+
+fn risky_packages_in(project_root: &Path) -> Vec<&'static str> {
+    let package_json = fs::read_to_string(project_root.join("package.json")).unwrap_or_default();
+    [
+        "next",
+        "playwright",
+        "electron",
+        "expo",
+        "react-native",
+        "sharp",
+        "prisma",
+        "puppeteer",
+    ]
+    .into_iter()
+    .filter(|name| package_json.contains(&format!("\"{name}\"")))
+    .collect()
 }
 
 fn ensure_command(ctx: &RimContext, args: &[OsString], options: CliOptions) -> Result<u8, String> {

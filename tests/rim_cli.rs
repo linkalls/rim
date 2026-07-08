@@ -42,6 +42,9 @@ fn help_lists_cleanup_options() {
         "rim gc",
         "rim path",
         "rim explain",
+        "rim scan",
+        "rim adopt",
+        "rim backup",
         "rim ensure",
         "rim pin|unpin",
         "rim manager",
@@ -1427,4 +1430,333 @@ fn clean_removes_only_current_projects_ram_directory_and_dead_symlink() {
         !Path::new(&link).exists(),
         "node_modules symlink should be removed after clean"
     );
+}
+
+#[test]
+fn scan_detects_unmanaged_node_modules_candidates() {
+    let root = unique_temp("scan-root");
+    let project = root.join("tiny-hono");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(
+        project.join("package.json"),
+        "{\"dependencies\":{\"hono\":\"4.0.0\"}}\n",
+    )
+    .expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::write(
+        project.join("node_modules/pkg/index.js"),
+        "module.exports = 1\n",
+    )
+    .expect("dep");
+
+    let out = Command::new(bin())
+        .args(["scan", root.to_str().unwrap()])
+        .env("RIM_BASE", unique_temp("base"))
+        .current_dir(&root)
+        .output()
+        .expect("rim scan");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("tiny-hono"), "stdout: {stdout}");
+    assert!(stdout.contains("bun"), "stdout: {stdout}");
+    assert!(stdout.contains("low"), "stdout: {stdout}");
+    assert!(stdout.contains("adoptable"), "stdout: {stdout}");
+}
+
+#[test]
+fn scan_json_reports_pnpm_high_risk() {
+    let root = unique_temp("scan-json-root");
+    let project = root.join("pnpm-mono");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(
+        project.join("package.json"),
+        "{\"workspaces\":[\"packages/*\"]}\n",
+    )
+    .expect("package");
+    fs::write(project.join("pnpm-lock.yaml"), "lockfileVersion: 9\n").expect("pnpm lock");
+
+    let out = Command::new(bin())
+        .args(["scan", "--json", root.to_str().unwrap()])
+        .env("RIM_BASE", unique_temp("base"))
+        .current_dir(&root)
+        .output()
+        .expect("rim scan json");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"manager\":\"pnpm\""), "stdout: {stdout}");
+    assert!(stdout.contains("\"risk\":\"high\""), "stdout: {stdout}");
+    assert!(stdout.contains("\"action\":\"skip\""), "stdout: {stdout}");
+}
+
+#[test]
+fn scan_marks_managed_node_modules_symlink_as_skip() {
+    let root = unique_temp("scan-managed-root");
+    let project = root.join("managed-app");
+    fs::create_dir_all(&project).expect("project");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    let base = unique_temp("base");
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(prepare.status.success());
+
+    let out = Command::new(bin())
+        .args(["scan", root.to_str().unwrap()])
+        .env("RIM_BASE", &base)
+        .current_dir(&root)
+        .output()
+        .expect("rim scan");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("managed-app"), "stdout: {stdout}");
+    assert!(stdout.contains("skip"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("already managed by rim"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn adopt_dry_run_does_not_modify_node_modules() {
+    let project = unique_temp("adopt-dry-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "original\n").expect("file");
+
+    let out = Command::new(bin())
+        .args(["adopt", project.to_str().unwrap(), "--dry-run"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("adopt dry-run");
+    assert!(out.status.success());
+    assert!(
+        project.join("node_modules").is_dir(),
+        "dry-run should keep real dir"
+    );
+    assert!(
+        !project.join("node_modules").is_symlink(),
+        "dry-run should not symlink"
+    );
+    assert!(project.join("node_modules/pkg/index.js").exists());
+}
+
+#[test]
+fn adopt_moves_node_modules_to_layer_and_writes_metadata() {
+    let project = unique_temp("adopt-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "original\n").expect("file");
+
+    let out = Command::new(bin())
+        .args(["adopt", project.to_str().unwrap()])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("adopt");
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(project.join("node_modules").is_symlink());
+    let target = fs::read_link(project.join("node_modules")).expect("link");
+    assert!(target.starts_with(&base), "target: {target:?}");
+    assert!(target.join("pkg/index.js").exists());
+    let rim_dir = target.parent().and_then(Path::parent).expect("rim dir");
+    let meta = fs::read_to_string(rim_dir.join(".rim-meta.json")).expect("meta");
+    assert!(meta.contains("\"adopted\": true"), "meta: {meta}");
+    assert!(meta.contains("\"manager\": \"bun\""), "meta: {meta}");
+}
+
+#[test]
+fn adopt_refuses_high_risk_pnpm_without_allow_risk() {
+    let project = unique_temp("adopt-pnpm-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("pnpm-lock.yaml"), "lockfileVersion: 9\n").expect("pnpm lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+
+    let out = Command::new(bin())
+        .args(["adopt", project.to_str().unwrap()])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("adopt pnpm");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("high-risk adopt refused"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn adopt_allows_high_risk_with_allow_risk() {
+    let project = unique_temp("adopt-pnpm-allow-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("pnpm-lock.yaml"), "lockfileVersion: 9\n").expect("pnpm lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "patched\n").expect("dep");
+
+    let out = Command::new(bin())
+        .args(["adopt", project.to_str().unwrap(), "--allow-risk"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("adopt pnpm allow");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(project.join("node_modules").is_symlink());
+}
+
+#[test]
+fn adopt_warns_when_base_is_tmpfs() {
+    if !Path::new("/dev/shm").exists() {
+        return;
+    }
+    let project = unique_temp("adopt-tmpfs-project");
+    let base = Path::new("/dev/shm").join(format!("rim-test-base-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+
+    let out = Command::new(bin())
+        .args(["adopt", project.to_str().unwrap(), "--dry-run"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("adopt tmpfs dry-run");
+    let _ = fs::remove_dir_all(&base);
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("adopting into tmpfs"), "stderr: {stderr}");
+}
+
+#[test]
+fn diff_backup_saves_delta_and_restore_replays_changed_and_added_files() {
+    let project = unique_temp("diff-backup-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "patched\n").expect("changed");
+    fs::write(project.join("node_modules/pkg/local.js"), "local\n").expect("added");
+
+    let fake_bin = unique_temp("bin");
+    let fake_bun = fake_bin.join("bun");
+    fs::write(
+        &fake_bun,
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p node_modules/pkg\nprintf baseline > node_modules/pkg/index.js\nprintf lock > bun.lock\n",
+    )
+    .expect("fake bun");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_bun)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .args(["adopt", project.to_str().unwrap(), "--diff-backup"])
+        .env("RIM_BASE", &base)
+        .env("PATH", &path)
+        .current_dir(&project)
+        .output()
+        .expect("adopt diff backup");
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let backup_root = project.join(".rim-backups");
+    assert!(backup_root.exists());
+    let backups = fs::read_dir(&backup_root)
+        .expect("backups")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(backups.len(), 1);
+    let backup = backups[0].path();
+    assert!(
+        backup.join("changed/node_modules/pkg/index.js").exists(),
+        "changed file backup missing"
+    );
+    assert!(
+        backup.join("added/node_modules/pkg/local.js").exists(),
+        "added file backup missing"
+    );
+
+    fs::write(project.join("node_modules/pkg/index.js"), "baseline\n").expect("overwrite changed");
+    fs::remove_file(project.join("node_modules/pkg/local.js")).expect("remove added");
+
+    let dry = Command::new(bin())
+        .args(["backup", "restore", "latest", "--dry-run"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("restore dry-run");
+    assert!(dry.status.success());
+    assert!(
+        !project.join("node_modules/pkg/local.js").exists(),
+        "dry-run should not restore"
+    );
+
+    let restore = Command::new(bin())
+        .args(["backup", "restore", "latest"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("restore");
+    assert!(
+        restore.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&restore.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("node_modules/pkg/index.js")).unwrap(),
+        "patched\n"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("node_modules/pkg/local.js")).unwrap(),
+        "local\n"
+    );
+
+    let list = Command::new(bin())
+        .args(["backup", "list"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("backup list");
+    assert!(list.status.success());
+    assert!(String::from_utf8_lossy(&list.stdout).contains("node_modules-delta"));
+
+    let show = Command::new(bin())
+        .args(["backup", "show", "latest"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("backup show");
+    assert!(show.status.success());
+    assert!(String::from_utf8_lossy(&show.stdout).contains("changed:"));
 }
