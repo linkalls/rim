@@ -49,6 +49,7 @@ fn help_lists_cleanup_options() {
         "rim pin|unpin",
         "rim manager",
         "--include-pinned",
+        "--force",
         "install|run|test|start",
         "RIM_PROFILE",
         "--tmp",
@@ -1964,4 +1965,197 @@ fn backup_restore_apply_deletes_removes_deleted_entries_only_when_requested() {
         !project.join("node_modules/pkg/remove.js").exists(),
         "--apply-deletes should delete"
     );
+}
+
+#[test]
+fn run_command_writes_active_lock_while_child_is_running_and_removes_it_after() {
+    let project = make_project();
+    let base = unique_temp("base");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    let rim_dir = Command::new(bin())
+        .arg("path")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("rim path");
+    assert!(rim_dir.status.success());
+    let rim_dir = PathBuf::from(String::from_utf8_lossy(&rim_dir.stdout).trim().to_owned());
+
+    let fake_bin = unique_temp("bin");
+    let fake_bun = fake_bin.join("bun");
+    fs::write(
+        &fake_bun,
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [ -f \"$RIM_TEST_RIM_DIR/.rim-active\" ]; then printf active > \"$RIM_TEST_LOG\"; else printf missing > \"$RIM_TEST_LOG\"; fi\n",
+    )
+    .expect("fake bun");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_bun)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let log = project.join("active.log");
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .args(["bun", "run", "dev"])
+        .env("RIM_BASE", &base)
+        .env("PATH", path)
+        .env("RIM_TEST_RIM_DIR", &rim_dir)
+        .env("RIM_TEST_LOG", &log)
+        .current_dir(&project)
+        .output()
+        .expect("rim bun run dev");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(log).expect("log"), "active");
+    assert!(
+        !rim_dir.join(".rim-active").exists(),
+        "active lock should be removed after command exits"
+    );
+}
+
+#[test]
+fn clean_refuses_active_layer_unless_force() {
+    let project = make_project();
+    let base = unique_temp("base");
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(prepare.status.success());
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir");
+    fs::write(
+        rim_dir.join(".rim-active"),
+        format!(
+            "{{\"pid\":{},\"started_at\":0,\"command\":\"test\"}}\n",
+            std::process::id()
+        ),
+    )
+    .expect("active lock");
+
+    let clean = Command::new(bin())
+        .arg("clean")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("clean active");
+    assert!(!clean.status.success());
+    let stderr = String::from_utf8_lossy(&clean.stderr);
+    assert!(stderr.contains("rim layer is active"), "stderr: {stderr}");
+    assert!(rim_dir.exists(), "active layer should remain");
+
+    let clean = Command::new(bin())
+        .args(["clean", "--force"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("clean force");
+    assert!(
+        clean.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
+    assert!(!rim_dir.exists(), "--force should remove active layer");
+}
+
+#[test]
+fn gc_skips_active_layer_unless_force() {
+    let project = make_project();
+    let driver = make_project();
+    let base = unique_temp("base");
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(prepare.status.success());
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir")
+        .to_path_buf();
+    fs::write(
+        rim_dir.join(".rim-active"),
+        format!(
+            "{{\"pid\":{},\"started_at\":0,\"command\":\"test\"}}\n",
+            std::process::id()
+        ),
+    )
+    .expect("active lock");
+
+    let gc = Command::new(bin())
+        .args(["gc", "--all"])
+        .env("RIM_BASE", &base)
+        .current_dir(&driver)
+        .output()
+        .expect("gc all");
+    assert!(gc.status.success());
+    let stdout = String::from_utf8_lossy(&gc.stdout);
+    assert!(stdout.contains("skipping active layer"), "stdout: {stdout}");
+    assert!(rim_dir.exists(), "active layer should survive gc --all");
+
+    let gc = Command::new(bin())
+        .args(["gc", "--all", "--force"])
+        .env("RIM_BASE", &base)
+        .current_dir(&driver)
+        .output()
+        .expect("gc all force");
+    assert!(
+        gc.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&gc.stderr)
+    );
+    assert!(!rim_dir.exists(), "gc --force should remove active layer");
+}
+
+#[test]
+fn ls_marks_stale_active_lock() {
+    let project = make_project();
+    let base = unique_temp("base");
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(prepare.status.success());
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir");
+    fs::write(
+        rim_dir.join(".rim-active"),
+        "{\"pid\":99999999,\"started_at\":0,\"command\":\"dead\"}\n",
+    )
+    .expect("stale lock");
+
+    let out = Command::new(bin())
+        .arg("ls")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("rim ls");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("ACTIVE"), "stdout: {stdout}");
+    assert!(stdout.contains("stale:99999999"), "stdout: {stdout}");
 }

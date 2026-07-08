@@ -177,7 +177,7 @@ Usage:
   rim prepare
   rim status
   rim doctor [--suggest]
-  rim clean [--cache-only|--deps-only]
+  rim clean [--cache-only|--deps-only] [--force]
   rim scan [--json|--diff] <path>...
   rim adopt <project> [--dry-run] [--allow-risk] [--diff-backup]
   rim backup list|show|restore <id|latest> [--dry-run] [--apply-deletes]
@@ -185,7 +185,7 @@ Usage:
   rim pin|unpin
   rim manager
   rim ls
-  rim gc [--dry-run] [--orphaned] [--older-than 1d] [--all] [--include-pinned]
+  rim gc [--dry-run] [--orphaned] [--older-than 1d] [--all] [--include-pinned] [--force]
   rim path [--node-modules|--cache|--npm-cache|--bun-cache|--deno-cache|--tmp|--shadow]
   rim install|run|test|start|add|remove|update|ci [args...]  # auto-detect manager
   rim explain <bun|npm|deno|...> [args...]
@@ -403,10 +403,12 @@ fn ensure_node_modules_link(ctx: &RimContext) -> Result<(), String> {
 fn clean_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
     let mut cache_only = false;
     let mut deps_only = false;
+    let mut force = false;
     for arg in args {
         match arg.to_str() {
             Some("--cache-only") => cache_only = true,
             Some("--deps-only") => deps_only = true,
+            Some("--force") => force = true,
             Some(other) => return Err(format!("unknown clean option: {other}")),
             None => return Err("clean options must be valid UTF-8".to_owned()),
         }
@@ -414,6 +416,7 @@ fn clean_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
     if cache_only && deps_only {
         return Err("--cache-only and --deps-only cannot be used together".to_owned());
     }
+    guard_not_active(ctx, force)?;
     if cache_only {
         clean_cache(ctx)?;
         println!("cleaned cache: {}", ctx.rim_dir.display());
@@ -479,6 +482,78 @@ fn clean_node_modules_link(ctx: &RimContext) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveState {
+    None,
+    Active(u32),
+    Stale(u32),
+}
+
+impl ActiveState {
+    fn is_active(self) -> bool {
+        matches!(self, Self::Active(_))
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::None => "no".to_owned(),
+            Self::Active(pid) => format!("pid:{pid}"),
+            Self::Stale(pid) => format!("stale:{pid}"),
+        }
+    }
+}
+
+fn active_lock_path(rim_dir: &Path) -> PathBuf {
+    rim_dir.join(".rim-active")
+}
+
+fn active_state(rim_dir: &Path) -> ActiveState {
+    let path = active_lock_path(rim_dir);
+    let Ok(contents) = fs::read_to_string(path) else {
+        return ActiveState::None;
+    };
+    let pid = json_u64_field(&contents, "pid").unwrap_or(0) as u32;
+    if pid == 0 {
+        return ActiveState::Stale(0);
+    }
+    if pid_is_alive(pid) {
+        ActiveState::Active(pid)
+    } else {
+        ActiveState::Stale(pid)
+    }
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+fn write_active_lock(ctx: &RimContext, tool: &str, args: &[OsString]) -> Result<(), String> {
+    fs::create_dir_all(&ctx.rim_dir)
+        .map_err(|e| format!("cannot create {}: {e}", ctx.rim_dir.display()))?;
+    let command = format!("{} {}", tool, join_args(args));
+    let contents = format!(
+        "{{\n  \"pid\": {},\n  \"started_at\": {},\n  \"command\": \"{}\"\n}}\n",
+        std::process::id(),
+        now_unix(),
+        json_escape(&command)
+    );
+    fs::write(active_lock_path(&ctx.rim_dir), contents)
+        .map_err(|e| format!("cannot write active lock: {e}"))
+}
+
+fn remove_active_lock(ctx: &RimContext) {
+    let _ = fs::remove_file(active_lock_path(&ctx.rim_dir));
+}
+
+fn guard_not_active(ctx: &RimContext, force: bool) -> Result<(), String> {
+    match active_state(&ctx.rim_dir) {
+        ActiveState::Active(pid) if !force => Err(format!(
+            "rim layer is active by pid {pid}; pass --force only if you are sure"
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn status(ctx: &RimContext) {
     println!("project: {}", ctx.project_root.display());
     println!("rim_base: {}", ctx.rim_base.display());
@@ -506,6 +581,7 @@ struct LayerInfo {
     rim_dir: PathBuf,
     meta: Option<RimMeta>,
     size_bytes: u64,
+    active: ActiveState,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -515,6 +591,7 @@ struct GcOptions {
     orphaned: bool,
     older_than_seconds: Option<u64>,
     include_pinned: bool,
+    force: bool,
 }
 
 fn write_meta(ctx: &RimContext, manager: &str, update_manifest_hash: bool) -> Result<(), String> {
@@ -578,8 +655,8 @@ fn read_meta(rim_dir: &Path) -> Option<RimMeta> {
 fn list_layers(ctx: &RimContext) {
     let layers = collect_layers(ctx);
     println!(
-        "{:<36} {:<10} {:<8} {:>10} {:>8} {:>10} {:<6} {:<8}  LAYER",
-        "PROJECT", "MANAGER", "MODE", "SIZE", "AGE", "LAST_USED", "PIN", "VERSION"
+        "{:<36} {:<10} {:<8} {:>10} {:>8} {:>10} {:<6} {:<7} {:<8}  LAYER",
+        "PROJECT", "MANAGER", "MODE", "SIZE", "AGE", "LAST_USED", "PIN", "ACTIVE", "VERSION"
     );
     for layer in layers {
         let project = layer
@@ -618,8 +695,9 @@ fn list_layers(ctx: &RimContext) {
         } else {
             "no"
         };
+        let active = layer.active.label();
         println!(
-            "{project:<36} {manager:<10} {mode:<8} {:>10} {:>8} {:>10} {pin:<6} {version:<8}  {}",
+            "{project:<36} {manager:<10} {mode:<8} {:>10} {:>8} {:>10} {pin:<6} {active:<7} {version:<8}  {}",
             format_bytes(layer.size_bytes),
             age,
             last_used,
@@ -641,6 +719,10 @@ fn gc(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
     let mut bytes = 0_u64;
     for layer in collect_layers(ctx) {
         if !gc_matches(&layer, &options, now) {
+            continue;
+        }
+        if !options.force && layer.active.is_active() {
+            println!("skipping active layer: {}", layer.rim_dir.display());
             continue;
         }
         matched += 1;
@@ -684,6 +766,7 @@ fn parse_gc_options(args: &[OsString]) -> Result<GcOptions, String> {
             "--all" => options.all = true,
             "--orphaned" => options.orphaned = true,
             "--include-pinned" => options.include_pinned = true,
+            "--force" => options.force = true,
             "--older-than" => {
                 i += 1;
                 let Some(value) = args.get(i).and_then(|arg| arg.to_str()) else {
@@ -762,6 +845,7 @@ fn collect_layers(ctx: &RimContext) -> Vec<LayerInfo> {
         .map(|rim_dir| LayerInfo {
             size_bytes: dir_size(&rim_dir).unwrap_or(0),
             meta: read_meta(&rim_dir),
+            active: active_state(&rim_dir),
             rim_dir,
         })
         .collect::<Vec<_>>();
@@ -1253,6 +1337,8 @@ fn adopt_command(
         }
         return Ok(0);
     }
+
+    guard_not_active(&ctx, false)?;
 
     if diff_backup {
         create_diff_backup(&ctx, &candidate, allow_risk)?;
@@ -2620,6 +2706,7 @@ fn run_install_like(ctx: &RimContext, tool: &str, options: CliOptions) -> Result
 }
 
 fn run_command(ctx: &RimContext, tool: &str, args: &[OsString], cwd: &Path) -> Result<u8, String> {
+    write_active_lock(ctx, tool, args)?;
     let _signals = SignalGuard::install();
     let mut command = Command::new(tool);
     command
@@ -2639,9 +2726,9 @@ fn run_command(ctx: &RimContext, tool: &str, args: &[OsString], cwd: &Path) -> R
         });
     }
 
-    let status = command
-        .status()
-        .map_err(|e| format!("failed to execute {tool}: {e}"))?;
+    let status = command.status();
+    remove_active_lock(ctx);
+    let status = status.map_err(|e| format!("failed to execute {tool}: {e}"))?;
     Ok(exit_status_code(status))
 }
 

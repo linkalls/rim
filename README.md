@@ -35,6 +35,7 @@ Implemented:
 - `rim clean`
 - `rim clean --cache-only`
 - `rim clean --deps-only`
+- active layer locks: `.rim-active`, `rim clean --force`, `rim gc --force`
 - `rim --auto-clean ...`
 - `rim --ephemeral ...`
 - `rim [--dry-run] npm ...`
@@ -134,6 +135,7 @@ rim gc --dry-run --older-than 1d
 rim gc --older-than 1d
 rim gc --dry-run --all
 rim gc --dry-run --all --include-pinned
+rim gc --all --force            # override active-lock protection
 ```
 
 `rim gc` with no selector is safe by default: it behaves like `rim gc --dry-run --orphaned`.
@@ -168,6 +170,7 @@ Or remove only one part of the current layer:
 ```bash
 rim clean --cache-only  # keep node_modules, remove cache dirs
 rim clean --deps-only   # keep cache dirs, remove node_modules layer + project symlink
+rim clean --force       # override active-lock protection
 ```
 
 Dry-run without executing the wrapped tool:
@@ -270,6 +273,8 @@ node_modules -> /dev/shm/rim/app-<hash>/project/node_modules
 ```
 
 Each layer also gets `.rim-meta.json` so `rim ls` and `rim gc` can reverse-map a dependency layer back to its source project, manager, mode, created time, last-used time, manifest hash, and pinned state. Metadata writes are atomic: `rim` writes a temporary file and renames it into place.
+
+While a wrapped command is running, `rim` writes `.rim-active` in the layer with the current pid and command. `rim clean` refuses active layers by default, and `rim gc` skips them. Use `--force` only when you are sure the process is gone or the lock is stale.
 
 Deno commands are special: `rim deno ...` creates only the dependency-layer metadata/cache root and does not create a `node_modules` symlink in the project.
 
@@ -407,9 +412,9 @@ Restore applies `changed/`, `added/`, and `binary/` files. `deleted.json` is sho
 `rim ls` shows every dependency layer under the active `RIM_BASE`:
 
 ```txt
-PROJECT                              MANAGER    MODE           SIZE      AGE  LAST_USED PIN    VERSION   LAYER
-~/code/tiny-hono                     bun        tmpfs       18.3 MB      12m        1m no     0.1.0     /dev/shm/rim/tiny-hono-a1b2c3d4
-~/code/test-vite                     npm        tmpfs       92.1 MB       2h        1h yes    0.1.0     /dev/shm/rim/test-vite-b5c6d7e8
+PROJECT                              MANAGER    MODE           SIZE      AGE  LAST_USED PIN    ACTIVE  VERSION   LAYER
+~/code/tiny-hono                     bun        tmpfs       18.3 MB      12m        1m no     no      0.1.0     /dev/shm/rim/tiny-hono-a1b2c3d4
+~/code/test-vite                     npm        tmpfs       92.1 MB       2h        1h yes    pid:42  0.1.0     /dev/shm/rim/test-vite-b5c6d7e8
 ```
 
 `rim pin` protects the current layer from garbage collection. `rim unpin` removes that protection.
@@ -419,7 +424,7 @@ rim pin
 rim unpin
 ```
 
-`rim gc` removes dependency layers by metadata. Pinned layers are skipped unless `--include-pinned` is passed:
+`rim gc` removes dependency layers by metadata. Pinned layers are skipped unless `--include-pinned` is passed. Active layers are skipped unless `--force` is passed:
 
 ```bash
 rim gc --dry-run --orphaned   # show layers whose source project no longer exists
@@ -428,9 +433,10 @@ rim gc --dry-run --older-than 1d
 rim gc --older-than 1d
 rim gc --dry-run --all
 rim gc --dry-run --all --include-pinned
+rim gc --all --force            # override active-lock protection
 ```
 
-With no selector, `rim gc` is intentionally safe and only previews orphaned layers.
+With no selector, `rim gc` is intentionally safe and only previews orphaned layers. Stale active locks show as `stale:<pid>` in `rim ls`; live locks show as `pid:<pid>`.
 
 ## Doctor
 
@@ -623,10 +629,14 @@ Current suite:
 - `rim backup restore --apply-deletes` is required before deleted entries are removed
 - `.rim-meta.json` powers `rim ls` and metadata-based `rim gc`
 - `.rim-meta.json` stores manifest hash and pinned state
+- `.rim-active` marks layers currently running wrapped commands
+- `rim ls` shows ACTIVE as `no`, `pid:<pid>`, or `stale:<pid>`
 - `rim pin` / `rim unpin` toggle GC protection
 - `rim gc --dry-run --orphaned` previews orphaned layer cleanup
 - `rim gc --orphaned` removes orphaned layers
 - pinned layers are skipped by GC unless `--include-pinned` is used
+- active layers are skipped by GC unless `--force` is used
+- `rim clean` refuses active layers unless `--force` is used
 - `rim path` prints script-friendly dependency-layer paths
 - `rim manager` reports detected manager and reason
 - `rim install` / `rim run dev` auto-detect Bun or npm from project files
@@ -649,6 +659,7 @@ Current suite:
 - Linux-first. `/dev/shm` is the default because the main target is small Linux boxes and disposable dependency state.
 - RAM/tmpfs is finite; large Playwright/Next/Expo/Electron installs can still blow up `/dev/shm`.
 - Do not store hand-edited `node_modules` only in tmpfs. If `RIM_BASE` is `/dev/shm/rim`, adopted dependencies disappear on reboot; use `--diff-backup`, `RIM_PROFILE=cache`, or `RIM_PROFILE=external`.
+- `--force` overrides active-lock protection. Use it only for confirmed stale locks or emergency cleanup.
 - Restarting clears `/dev/shm`; run `rim npm install` again to recreate dependencies.
 - For long-lived or heavy projects on tiny machines, consider `RIM_BASE=$HOME/.cache/rim` or an external drive.
 - `--ephemeral` auto-installs only for package-manager `run`, `test`, and `start` commands for now.
