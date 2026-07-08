@@ -1,3 +1,5 @@
+mod platform;
+
 use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::env;
@@ -5,10 +7,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
-use std::os::unix::fs::symlink;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, ExitStatus};
+use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
@@ -204,7 +204,7 @@ Options:
   --keep-cache     Keep npm/bun package-manager cache after successful installs
 
 Environment:
-  RIM_BASE      dependency layer base directory, default /dev/shm/rim
+  RIM_BASE      dependency layer base directory override
   RIM_PROFILE   ram|cache|external preset when RIM_BASE is unset"
     );
 }
@@ -213,16 +213,7 @@ fn resolve_rim_base() -> Result<PathBuf, String> {
     if let Some(base) = env::var_os("RIM_BASE") {
         return Ok(PathBuf::from(base));
     }
-    match env::var("RIM_PROFILE").ok().as_deref() {
-        None | Some("") | Some("ram") => Ok(PathBuf::from("/dev/shm/rim")),
-        Some("cache") => Ok(cache_dir().join("rim")),
-        Some("external") => Ok(env::var_os("RIM_EXTERNAL_BASE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/mnt/external/rim"))),
-        Some(other) => Err(format!(
-            "unknown RIM_PROFILE={other}; expected ram, cache, or external"
-        )),
-    }
+    platform::default_rim_base()
 }
 
 fn build_context() -> Result<RimContext, String> {
@@ -383,26 +374,39 @@ fn mutable_manifest_names() -> &'static [&'static str] {
 fn ensure_node_modules_link(ctx: &RimContext) -> Result<(), String> {
     let link = ctx.project_root.join("node_modules");
 
-    match fs::symlink_metadata(&link) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            let target = fs::read_link(&link)
-                .map_err(|e| format!("cannot read node_modules symlink: {e}"))?;
-            if target != ctx.node_modules {
-                fs::remove_file(&link)
-                    .map_err(|e| format!("cannot replace node_modules symlink: {e}"))?;
-                symlink(&ctx.node_modules, &link)
-                    .map_err(|e| format!("cannot create node_modules symlink: {e}"))?;
-            }
-            Ok(())
+    if platform::is_dir_link(&link) {
+        let target = platform::read_dir_link(&link)
+            .map_err(|e| format!("cannot read node_modules link: {e}"))?;
+        if target != ctx.node_modules {
+            platform::remove_dir_link(&link)
+                .map_err(|e| format!("cannot replace node_modules link: {e}"))?;
+            create_node_modules_link(&ctx.node_modules, &link)?;
         }
+        return Ok(());
+    }
+
+    match fs::symlink_metadata(&link) {
         Ok(_) => Err(
-            "node_modules exists and is not a symlink. Try: mv node_modules node_modules.backup && rim install"
+            "node_modules exists and is not a directory link. Try: mv node_modules node_modules.backup && rim install"
                 .to_owned(),
         ),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => symlink(&ctx.node_modules, &link)
-            .map_err(|e| format!("cannot create node_modules symlink: {e}")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            create_node_modules_link(&ctx.node_modules, &link)
+        }
         Err(e) => Err(format!("cannot inspect node_modules: {e}")),
     }
+}
+
+fn create_node_modules_link(target: &Path, link: &Path) -> Result<(), String> {
+    platform::create_dir_link(target, link).map_err(|e| {
+        if platform::platform_name() == "windows" {
+            format!(
+                "failed to create Windows directory symlink.\n\nWindows directory symlinks may require Developer Mode, SeCreateSymbolicLinkPrivilege,\nor running the terminal as Administrator.\n\nTry one of:\n  - enable Developer Mode\n  - run your terminal as Administrator\n  - use WSL\n  - set RIM_BASE to a persistent cache path and retry\n\nsource error: {e}"
+            )
+        } else {
+            format!("cannot create node_modules symlink: {e}")
+        }
+    })
 }
 
 fn clean_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
@@ -473,15 +477,12 @@ fn clean_cache(ctx: &RimContext) -> Result<(), String> {
 
 fn clean_node_modules_link(ctx: &RimContext) -> Result<(), String> {
     let link = ctx.project_root.join("node_modules");
-    if fs::symlink_metadata(&link)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        let target =
-            fs::read_link(&link).map_err(|e| format!("cannot read node_modules link: {e}"))?;
+    if platform::is_dir_link(&link) {
+        let target = platform::read_dir_link(&link)
+            .map_err(|e| format!("cannot read node_modules link: {e}"))?;
         if target == ctx.node_modules {
-            fs::remove_file(&link)
-                .map_err(|e| format!("cannot remove node_modules symlink: {e}"))?;
+            platform::remove_dir_link(&link)
+                .map_err(|e| format!("cannot remove node_modules link: {e}"))?;
         }
     }
     Ok(())
@@ -517,21 +518,15 @@ fn active_state(rim_dir: &Path) -> ActiveState {
     let Ok(contents) = fs::read_to_string(path) else {
         return ActiveState::None;
     };
-    let pid = json_u64_field(&contents, "pid").unwrap_or(0) as u32;
-    if pid == 0 {
+    let Some(pid) = json_u64_field(&contents, "pid").and_then(|value| u32::try_from(value).ok())
+    else {
         return ActiveState::Stale(0);
-    }
-    if pid_is_alive(pid) {
+    };
+    if platform::pid_is_alive(pid) {
         ActiveState::Active(pid)
     } else {
         ActiveState::Stale(pid)
     }
-}
-
-fn pid_is_alive(pid: u32) -> bool {
-    // Linux-first, best-effort active protection. A future version can compare
-    // process start time from /proc/<pid>/stat to reduce PID reuse ambiguity.
-    Path::new("/proc").join(pid.to_string()).exists()
 }
 
 fn write_active_lock(ctx: &RimContext, tool: &str, args: &[OsString]) -> Result<(), String> {
@@ -1153,12 +1148,9 @@ fn analyze_node_modules(ctx: &RimContext, node_modules: &Path) -> ScanCandidate 
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let meta = fs::symlink_metadata(node_modules).ok();
-    let is_symlink = meta
-        .as_ref()
-        .is_some_and(|meta| meta.file_type().is_symlink());
+    let is_symlink = platform::is_dir_link(node_modules);
     let managed = is_symlink
-        && fs::read_link(node_modules)
+        && platform::read_dir_link(node_modules)
             .map(|target| target.starts_with(&ctx.rim_base))
             .unwrap_or(false);
     let size_bytes = if is_symlink {
@@ -1367,7 +1359,7 @@ fn adopt_command(
     }
     let meta = fs::symlink_metadata(&node_modules)
         .map_err(|_| format!("{} does not exist", node_modules.display()))?;
-    if !meta.is_dir() || meta.file_type().is_symlink() {
+    if !meta.is_dir() || platform::is_dir_link(&node_modules) {
         return Err(
             "adopt requires a real node_modules directory, not a symlink or file".to_owned(),
         );
@@ -1412,23 +1404,31 @@ rim: adopt failed after moving node_modules; rollback restored {}",
                 node_modules.display()
             )),
             Err(rollback_err) => Err(format!(
-                "{err}
-rim: adopt failed after moving node_modules.
-rim: rollback failed: {rollback_err}
-rim: your node_modules is still at:
-  {}
-
-To recover manually:
-  ln -s {} {}
-or:
-  mv {} {}",
+                "{err}\nrim: adopt failed after moving node_modules.\nrim: rollback failed: {rollback_err}\nrim: your node_modules is still at:\n  {}\n\n{}",
                 ctx.node_modules.display(),
-                ctx.node_modules.display(),
-                node_modules.display(),
-                ctx.node_modules.display(),
-                node_modules.display()
+                manual_recovery_message(&ctx.node_modules, &node_modules)
             )),
         },
+    }
+}
+
+fn manual_recovery_message(layer_node_modules: &Path, project_node_modules: &Path) -> String {
+    if platform::platform_name() == "windows" {
+        format!(
+            "To recover manually on Windows:\n  mklink /D {} {}\n\nor move it back:\n  move {} {}\n\nNote: mklink /D may require Developer Mode, SeCreateSymbolicLinkPrivilege, or Administrator privileges.",
+            project_node_modules.display(),
+            layer_node_modules.display(),
+            layer_node_modules.display(),
+            project_node_modules.display()
+        )
+    } else {
+        format!(
+            "To recover manually:\n  ln -s {} {}\nor:\n  mv {} {}",
+            layer_node_modules.display(),
+            project_node_modules.display(),
+            layer_node_modules.display(),
+            project_node_modules.display()
+        )
     }
 }
 
@@ -1440,8 +1440,7 @@ fn finish_adopt_after_move(
     if env::var_os("RIM_TEST_FAIL_ADOPT_SYMLINK").is_some() {
         return Err("cannot create node_modules symlink: simulated failure".to_owned());
     }
-    symlink(&ctx.node_modules, project_node_modules)
-        .map_err(|e| format!("cannot create node_modules symlink: {e}"))?;
+    create_node_modules_link(&ctx.node_modules, project_node_modules)?;
     if env::var_os("RIM_TEST_FAIL_ADOPT_META").is_some() {
         return Err("cannot write rim metadata: simulated failure".to_owned());
     }
@@ -1453,13 +1452,10 @@ fn rollback_adopt_move(ctx: &RimContext, project_node_modules: &Path) -> Result<
         fs::create_dir_all(project_node_modules)
             .map_err(|e| format!("cannot create rollback blocker: {e}"))?;
     }
-    if fs::symlink_metadata(project_node_modules)
-        .map(|meta| meta.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        fs::remove_file(project_node_modules).map_err(|e| {
+    if platform::is_dir_link(project_node_modules) {
+        platform::remove_dir_link(project_node_modules).map_err(|e| {
             format!(
-                "cannot remove failed symlink {}: {e}",
+                "cannot remove failed link {}: {e}",
                 project_node_modules.display()
             )
         })?;
@@ -1745,7 +1741,7 @@ fn snapshot_tree(root: &Path) -> Result<BTreeMap<String, TreeEntry>, String> {
                         kind: "symlink".to_owned(),
                         size: meta.len(),
                         hash: None,
-                        link_target: fs::read_link(&child)
+                        link_target: platform::read_dir_link(&child)
                             .ok()
                             .map(|p| p.to_string_lossy().to_string()),
                     },
@@ -1801,8 +1797,8 @@ fn copy_backup_item(
     }
     if entry.kind == "symlink" {
         if let Some(target) = &entry.link_target {
-            symlink(target, &dst)
-                .map_err(|e| format!("cannot backup symlink {}: {e}", dst.display()))?;
+            platform::create_dir_link(Path::new(target), &dst)
+                .map_err(|e| format!("cannot backup directory link {}: {e}", dst.display()))?;
         }
     } else {
         fs::copy(&src, &dst)
@@ -2036,10 +2032,11 @@ fn restore_tree(src_root: &Path, dst_root: &Path, dry_run: bool) -> Result<(), S
                             .map_err(|e| format!("cannot create restore parent: {e}"))?;
                     }
                     if meta.file_type().is_symlink() {
-                        let target = fs::read_link(&src)
-                            .map_err(|e| format!("cannot read backup symlink: {e}"))?;
-                        let _ = fs::remove_file(&dst);
-                        symlink(target, dst).map_err(|e| format!("cannot restore symlink: {e}"))?;
+                        let target = platform::read_dir_link(&src)
+                            .map_err(|e| format!("cannot read backup link: {e}"))?;
+                        let _ = platform::remove_dir_link(&dst);
+                        platform::create_dir_link(&target, &dst)
+                            .map_err(|e| format!("cannot restore directory link: {e}"))?;
                     } else {
                         fs::copy(&src, &dst)
                             .map_err(|e| format!("cannot restore file {}: {e}", dst.display()))?;
@@ -2119,9 +2116,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         let meta = fs::symlink_metadata(&from)
             .map_err(|e| format!("cannot stat {}: {e}", from.display()))?;
         if meta.file_type().is_symlink() {
-            let target = fs::read_link(&from)
-                .map_err(|e| format!("cannot read symlink {}: {e}", from.display()))?;
-            symlink(target, to).map_err(|e| format!("cannot copy symlink: {e}"))?;
+            let target = platform::read_dir_link(&from)
+                .map_err(|e| format!("cannot read link {}: {e}", from.display()))?;
+            platform::create_dir_link(&target, &to)
+                .map_err(|e| format!("cannot copy directory link: {e}"))?;
         } else if meta.is_dir() {
             copy_dir_recursive(&from, &to)?;
         } else {
@@ -2886,7 +2884,7 @@ fn run_install_like(ctx: &RimContext, tool: &str, options: CliOptions) -> Result
 
 fn run_command(ctx: &RimContext, tool: &str, args: &[OsString], cwd: &Path) -> Result<u8, String> {
     write_active_lock(ctx, tool, args)?;
-    let _signals = SignalGuard::install();
+    let _signals = platform::SignalGuard::install();
     let mut command = Command::new(tool);
     command
         .args(args)
@@ -2898,29 +2896,12 @@ fn run_command(ctx: &RimContext, tool: &str, args: &[OsString], cwd: &Path) -> R
         .env("PLAYWRIGHT_BROWSERS_PATH", &ctx.playwright_browsers)
         .env("BUN_INSTALL_CACHE_DIR", &ctx.bun_cache);
 
-    unsafe {
-        command.pre_exec(|| {
-            restore_default_signals();
-            Ok(())
-        });
-    }
+    platform::configure_child_command(&mut command);
 
     let status = command.status();
     remove_active_lock(ctx);
     let status = status.map_err(|e| format!("failed to execute {tool}: {e}"))?;
-    Ok(exit_status_code(status))
-}
-
-fn exit_status_code(status: ExitStatus) -> u8 {
-    status
-        .code()
-        .map(|code| code.clamp(0, 255) as u8)
-        .or_else(|| {
-            status
-                .signal()
-                .map(|signal| (128 + signal).clamp(0, 255) as u8)
-        })
-        .unwrap_or(1)
+    Ok(platform::exit_status_code(status))
 }
 
 fn clean_after_command(ctx: &RimContext) {
@@ -3013,50 +2994,6 @@ fn print_env(ctx: &RimContext) {
         ctx.playwright_browsers.display()
     );
     println!("BUN_INSTALL_CACHE_DIR={}", ctx.bun_cache.display());
-}
-
-const SIGINT: i32 = 2;
-const SIGTERM: i32 = 15;
-const SIG_DFL: usize = 0;
-
-type SignalHandler = usize;
-
-unsafe extern "C" {
-    fn signal(signum: i32, handler: SignalHandler) -> SignalHandler;
-}
-
-extern "C" fn record_signal(_signal: i32) {}
-
-struct SignalGuard {
-    previous_int: SignalHandler,
-    previous_term: SignalHandler,
-}
-
-impl SignalGuard {
-    fn install() -> Self {
-        let previous_int = unsafe { signal(SIGINT, record_signal as *const () as SignalHandler) };
-        let previous_term = unsafe { signal(SIGTERM, record_signal as *const () as SignalHandler) };
-        Self {
-            previous_int,
-            previous_term,
-        }
-    }
-}
-
-impl Drop for SignalGuard {
-    fn drop(&mut self) {
-        unsafe {
-            signal(SIGINT, self.previous_int);
-            signal(SIGTERM, self.previous_term);
-        }
-    }
-}
-
-fn restore_default_signals() {
-    unsafe {
-        signal(SIGINT, SIG_DFL);
-        signal(SIGTERM, SIG_DFL);
-    }
 }
 
 fn is_install_like(tool: &str, args: &[OsString]) -> bool {

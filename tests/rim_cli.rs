@@ -1,5 +1,6 @@
+#![cfg(unix)]
+
 use std::fs;
-use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,6 +27,16 @@ fn make_project() -> PathBuf {
     )
     .expect("package.json");
     project
+}
+
+#[cfg(unix)]
+fn create_test_file_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_test_file_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
 }
 
 #[test]
@@ -254,7 +265,7 @@ fn refuses_to_overwrite_real_node_modules_directory() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("node_modules exists and is not a symlink. Try:"),
+        stderr.contains("node_modules exists and is not a directory link. Try:"),
         "stderr: {stderr}"
     );
 }
@@ -970,7 +981,8 @@ fn status_counts_symlinks_without_following_targets() {
         .parent()
         .and_then(Path::parent)
         .expect("rim dir");
-    symlink(&outside_file, rim_dir.join("outside-big-file")).expect("external symlink");
+    create_test_file_link(&outside_file, &rim_dir.join("outside-big-file"))
+        .expect("external symlink");
 
     let out = Command::new(bin())
         .arg("status")

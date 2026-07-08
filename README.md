@@ -1,6 +1,6 @@
 # rim
 
-**rim** is a tiny Rust CLI for storage-starved Linux machines: keep project source on disk, but move disposable JavaScript dependency weight into a separate dependency layer.
+**rim** is a tiny Rust CLI for storage-starved Linux machines and experimental native Windows setups: keep project source on disk, but move disposable JavaScript dependency weight into a separate dependency layer.
 
 The core idea:
 
@@ -12,7 +12,7 @@ This is especially useful on small experiments, AI-generated throwaway apps, and
 
 ## Current status
 
-MVP, Linux-first.
+MVP, Linux-first, native Windows experimental.
 
 Implemented:
 
@@ -49,8 +49,9 @@ Implemented:
 - Deno commands skip the project `node_modules` symlink and only redirect cache/env paths
 - `.rim-meta.json` is written into each dependency layer for `rim ls` / `rim gc`, with manifest hash and pinned state
 - existing unmanaged `node_modules` can be scanned and safely adopted into a rim layer
-- optional diff backups compare existing `node_modules` against a fresh install before adoption
+- optional diff backups compare existing `node_modules` against a fresh install
 - `bunfig.toml` is copied into the shadow project for Bun installs
+- native Windows compile support via a small platform abstraction; Windows runtime support is experimental
 
 No external Rust dependencies are used.
 
@@ -307,15 +308,16 @@ RIM_BASE=/dev/shm/rim rim npm install
 Profile presets:
 
 ```bash
-RIM_PROFILE=ram rim install       # /dev/shm/rim
-RIM_PROFILE=cache rim install     # $HOME/.cache/rim
-RIM_PROFILE=external rim install  # $RIM_EXTERNAL_BASE or /mnt/external/rim
+RIM_PROFILE=ram rim install       # Linux/WSL: /dev/shm/rim
+RIM_PROFILE=cache rim install     # Linux: $HOME/.cache/rim; Windows: %LOCALAPPDATA%\rim
+RIM_PROFILE=external rim install  # requires $RIM_EXTERNAL_BASE / %RIM_EXTERNAL_BASE%
 ```
 
 Default when unset:
 
 ```txt
-/dev/shm/rim
+Linux/WSL:       /dev/shm/rim
+Native Windows:  %LOCALAPPDATA%\rim
 ```
 
 You can choose different operating modes:
@@ -342,6 +344,37 @@ BUN_INSTALL_CACHE_DIR=<rim-dir>/bun-cache
 `rim` can still run arbitrary commands, but pnpm is not a recommended target for the RAM/tmpfs mode. Its store model showed large RAM overhead in benchmarking, so pnpm is treated as experimental/opt-in rather than part of the main support path.
 
 After successful npm/bun install-like commands, `rim` trims the package-manager cache directory by default. The installed `node_modules` dependency tree remains. Use `--keep-cache` if you prefer faster repeated installs over minimum RAM usage.
+
+
+## Windows
+
+Native Windows support is experimental. Linux and WSL remain the primary targets.
+
+Default dependency layer on native Windows:
+
+```txt
+%LOCALAPPDATA%\rim
+```
+
+Recommended native Windows modes:
+
+```powershell
+$env:RIM_PROFILE = "cache"; rim install
+$env:RIM_PROFILE = "external"; $env:RIM_EXTERNAL_BASE = "E:\rim"; rim install
+```
+
+`RIM_PROFILE=ram` is not available on native Windows. For `/dev/shm` tmpfs behavior, use WSL. For a Windows RAM disk, set `RIM_BASE` manually to that RAM-disk path.
+
+Native Windows `node_modules` links use directory symlinks. Creating them may require Developer Mode, `SeCreateSymbolicLinkPrivilege`, or running the terminal as Administrator. If symlink creation fails, try one of:
+
+- enable Developer Mode
+- run your terminal as Administrator
+- use WSL
+- set `RIM_BASE` to a persistent cache/external path and retry
+
+Junction fallback is intentionally left for a future version; the current MVP uses stable Rust directory symlinks only.
+
+Active lock protection is best-effort on every platform. On Linux/WSL it checks `/proc/<pid>`; on native Windows it uses `tasklist` when available and stays conservative if the check fails.
 
 ## Scanning and adopting existing node_modules
 
@@ -707,7 +740,7 @@ Current suite:
 
 ## Caveats
 
-- Linux-first. `/dev/shm` is the default because the main target is small Linux boxes and disposable dependency state.
+- Linux-first, with experimental native Windows support. `/dev/shm` is the Linux/WSL default because the main target is small Linux boxes and disposable dependency state.
 - RAM/tmpfs is finite; large Playwright/Next/Expo/Electron installs can still blow up `/dev/shm`.
 - Do not store hand-edited `node_modules` only in tmpfs. If `RIM_BASE` is `/dev/shm/rim`, adopted dependencies disappear on reboot; use `--diff-backup`, `RIM_PROFILE=cache`, or `RIM_PROFILE=external`.
 - Active-lock protection is best-effort and based on `/proc/<pid>` on Linux; PID reuse is theoretically possible.
