@@ -20,6 +20,8 @@ Implemented:
 - `rim status`
 - `rim doctor`
 - `rim clean`
+- `rim --auto-clean ...`
+- `rim --ephemeral ...`
 - `rim [--dry-run] npm ...`
 - `rim [--dry-run] pnpm ...`
 - `rim [--dry-run] bun ...`
@@ -95,6 +97,44 @@ Dry-run without executing the tool:
 ```bash
 rim --dry-run npm install
 ```
+
+## Auto-clean and ephemeral mode
+
+`--auto-clean` is the low-level cleanup hook. It uses the current `rim` dependency layer, runs the wrapped command, then runs the same cleanup as `rim clean` after the command exits.
+
+```bash
+rim bun install
+rim --auto-clean bun run dev
+rim --auto-clean bun test
+```
+
+Notes:
+
+- `--auto-clean` does not auto-install dependencies.
+- The wrapped command's exit code is preserved.
+- By default, cleanup runs after both success and failure.
+- Add `--keep-on-error` to preserve the dependency layer after a failing command.
+
+```bash
+rim --auto-clean --keep-on-error bun test
+```
+
+If you use `--auto-clean` with an install-like command, `rim` warns because the installed dependency tree will be removed immediately after install finishes. Manifest and lockfile changes are still copied back to the real project.
+
+```bash
+rim --auto-clean bun install
+# warning: dependencies will be removed, package/lockfile changes remain
+```
+
+`--ephemeral` is the higher-level one-shot experiment mode. It implies `--auto-clean`, starts from a fresh dependency layer, auto-runs `install` for package-manager run/test/start commands when dependencies are missing, runs the requested command, then cleans up.
+
+```bash
+rim --ephemeral bun run dev
+rim --ephemeral bun test
+rim --ephemeral npm run dev
+```
+
+This is the intended mode for cloning a small repo, trying it once, then leaving only source and lockfile changes behind. `Ctrl+C`/SIGINT is handled so the parent `rim` process can clean after the child exits.
 
 ## How it works
 
@@ -281,9 +321,12 @@ Current suite:
 
 - prepares `node_modules` symlink into RAM base
 - refuses to overwrite a real `node_modules` directory
-- dry-run reports command, `RIM_BASE`, and cache envs
+- dry-run reports command, `RIM_BASE`, cleanup flags, and cache envs
 - `rim doctor` reports storage/memory risk and project warning signals
+- `--auto-clean` removes the current dependency layer after wrapped commands while preserving exit codes
+- `--ephemeral` auto-installs missing dependencies for run/test/start commands and cleans afterward
 - install-like commands warn when `RIM_BASE` is low on space
+- install-like commands with `--auto-clean` warn that dependencies will be removed while manifest changes remain
 - pnpm injects `--store-dir`
 - install-like commands run in RAM shadow project and copy lockfiles back
 - clean removes only the current project's RAM dir and symlink
@@ -294,5 +337,6 @@ Current suite:
 - RAM/tmpfs is finite; large Playwright/Next/Expo/Electron installs can still blow up `/dev/shm`.
 - Restarting clears `/dev/shm`; run `rim npm install` again to recreate dependencies.
 - For long-lived or heavy projects on tiny machines, consider `RIM_BASE=$HOME/.cache/rim` or an external drive.
+- `--ephemeral` auto-installs only for package-manager `run`, `test`, and `start` commands for now.
 - Some package-manager edge cases are not handled yet, especially workspaces and lifecycle scripts that assume install cwd is the real source tree.
 - This is intentionally not a global package manager replacement. It is a small wrapper for ephemeral or isolated dependencies.

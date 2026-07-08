@@ -315,6 +315,170 @@ fn doctor_reports_storage_and_project_risk_signals() {
 }
 
 #[test]
+fn auto_clean_removes_layer_after_success() {
+    let project = make_project();
+    let base = unique_temp("base");
+
+    let out = Command::new(bin())
+        .args([
+            "--auto-clean",
+            "sh",
+            "-c",
+            "test -L node_modules && test -d \"$(readlink node_modules)\"",
+        ])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("run rim auto-clean sh");
+
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !project.join("node_modules").exists(),
+        "auto-clean should remove the project symlink"
+    );
+    assert!(
+        !base
+            .read_dir()
+            .map(|mut it| it.next().is_some())
+            .unwrap_or(false),
+        "auto-clean should remove the current rim dir"
+    );
+}
+
+#[test]
+fn auto_clean_keep_on_error_preserves_layer_and_exit_code() {
+    let project = make_project();
+    let base = unique_temp("base");
+
+    let out = Command::new(bin())
+        .args(["--auto-clean", "--keep-on-error", "sh", "-c", "exit 42"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("run rim auto-clean failing sh");
+
+    assert_eq!(out.status.code(), Some(42));
+    assert!(
+        project.join("node_modules").is_symlink(),
+        "--keep-on-error should preserve the dependency layer after failure"
+    );
+}
+
+#[test]
+fn auto_clean_install_warns_keeps_manifests_and_removes_dependencies() {
+    let project = make_project();
+    let base = unique_temp("base");
+    let fake_bin = unique_temp("bin");
+    let fake_npm = fake_bin.join("npm");
+    fs::write(
+        &fake_npm,
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf '{\"lockfileVersion\":3}\n' > package-lock.json\nmkdir -p node_modules/fake\n",
+    )
+    .expect("fake npm");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_npm)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .args(["--auto-clean", "npm", "install"])
+        .env("RIM_BASE", &base)
+        .env("PATH", path)
+        .current_dir(&project)
+        .output()
+        .expect("run rim auto-clean install");
+
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--auto-clean after install will remove installed dependencies"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        project.join("package-lock.json").exists(),
+        "manifest/lockfile changes should remain after auto-clean install"
+    );
+    assert!(
+        !project.join("node_modules").exists(),
+        "installed dependencies should be removed after auto-clean install"
+    );
+}
+
+#[test]
+fn ephemeral_installs_before_run_preserves_exit_code_and_cleans() {
+    let project = make_project();
+    let base = unique_temp("base");
+    let fake_bin = unique_temp("bin");
+    let fake_npm = fake_bin.join("npm");
+    let log = project.join("npm-log.txt");
+    fs::write(
+        &fake_npm,
+        "#!/usr/bin/env bash\nset -euo pipefail\necho \"$PWD|$*\" >> \"$RIM_TEST_LOG\"\nif [ \"${1:-}\" = install ]; then\n  printf '{\"lockfileVersion\":3}\n' > package-lock.json\n  mkdir -p node_modules/fake\n  exit 0\nfi\nif [ \"${1:-}\" = run ]; then\n  test -L node_modules\n  test -d \"$(readlink node_modules)/fake\"\n  exit 7\nfi\nexit 99\n",
+    )
+    .expect("fake npm");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_npm)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .args(["--ephemeral", "npm", "run", "dev"])
+        .env("RIM_BASE", &base)
+        .env("PATH", path)
+        .env("RIM_TEST_LOG", &log)
+        .current_dir(&project)
+        .output()
+        .expect("run rim ephemeral npm run");
+
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = fs::read_to_string(log).expect("npm log");
+    assert!(log.contains("|install"), "log: {log}");
+    assert!(log.contains("|run dev"), "log: {log}");
+    assert!(
+        project.join("package-lock.json").exists(),
+        "ephemeral install should still copy lockfiles back"
+    );
+    assert!(
+        !project.join("node_modules").exists(),
+        "ephemeral should clean even when the requested command fails"
+    );
+}
+
+#[test]
 fn clean_removes_only_current_projects_ram_directory_and_dead_symlink() {
     let project = make_project();
     let base = unique_temp("base");

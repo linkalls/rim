@@ -3,8 +3,10 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::os::unix::fs::symlink;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, ExitStatus};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone)]
 struct RimContext {
@@ -22,6 +24,20 @@ struct RimContext {
     pnpm_store: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct CliOptions {
+    dry_run: bool,
+    auto_clean: bool,
+    keep_on_error: bool,
+    ephemeral: bool,
+}
+
+impl CliOptions {
+    fn should_clean_after(self, exit_code: u8) -> bool {
+        (self.auto_clean || self.ephemeral) && (!self.keep_on_error || exit_code == 0)
+    }
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(code),
@@ -34,12 +50,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<u8, String> {
     let mut args: Vec<OsString> = env::args_os().skip(1).collect();
-    let dry_run = if args.first().is_some_and(|a| a == "--dry-run") {
-        args.remove(0);
-        true
-    } else {
-        false
-    };
+    let options = parse_options(&mut args)?;
 
     let Some(command) = args.first().and_then(|a| a.to_str()).map(str::to_owned) else {
         print_help();
@@ -74,9 +85,33 @@ fn run() -> Result<u8, String> {
         }
         tool => {
             let tool_args = args.split_off(1);
-            run_tool(&ctx, tool, tool_args, dry_run)
+            run_tool(&ctx, tool, tool_args, options)
         }
     }
+}
+
+fn parse_options(args: &mut Vec<OsString>) -> Result<CliOptions, String> {
+    let mut options = CliOptions::default();
+    loop {
+        let Some(flag) = args.first().and_then(|arg| arg.to_str()) else {
+            break;
+        };
+        match flag {
+            "--dry-run" => options.dry_run = true,
+            "--auto-clean" => options.auto_clean = true,
+            "--keep-on-error" => options.keep_on_error = true,
+            "--ephemeral" => {
+                options.ephemeral = true;
+                options.auto_clean = true;
+            }
+            _ => break,
+        }
+        args.remove(0);
+    }
+    if options.keep_on_error && !(options.auto_clean || options.ephemeral) {
+        return Err("--keep-on-error requires --auto-clean or --ephemeral".to_owned());
+    }
+    Ok(options)
 }
 
 fn print_help() {
@@ -598,13 +633,38 @@ fn run_tool(
     ctx: &RimContext,
     tool: &str,
     args: Vec<OsString>,
-    dry_run: bool,
+    options: CliOptions,
 ) -> Result<u8, String> {
     let install_like = is_install_like(tool, &args);
+    if (options.auto_clean || options.ephemeral) && install_like {
+        eprintln!("rim: warning: --auto-clean after install will remove installed dependencies.");
+        eprintln!("rim: manifest and lockfile changes will remain.");
+    }
     if install_like {
         warn_about_low_rim_space(ctx);
     }
+
+    if options.ephemeral && !options.dry_run {
+        clean(ctx)?;
+    }
+
     ensure_layout(ctx)?;
+
+    let needs_ephemeral_install = options.ephemeral
+        && !install_like
+        && should_ephemeral_install(tool, &args)
+        && (options.dry_run || dependencies_missing(ctx));
+
+    if needs_ephemeral_install {
+        let install_code = run_install_like(ctx, tool, options.dry_run)?;
+        if install_code != 0 {
+            if options.should_clean_after(install_code) {
+                clean_after_command(ctx);
+            }
+            return Ok(install_code);
+        }
+    }
+
     if install_like {
         sync_manifests_to_shadow(ctx)?;
     }
@@ -616,41 +676,178 @@ fn run_tool(
         &ctx.project_root
     };
 
-    if dry_run {
+    if options.dry_run {
         println!("project: {}", ctx.project_root.display());
         println!("rim_base: {}", ctx.rim_base.display());
         println!("rim_dir: {}", ctx.rim_dir.display());
         println!("cwd: {}", cwd.display());
         println!("command: {} {}", tool, join_args(&final_args));
-        println!("npm_config_cache={}", ctx.npm_cache.display());
-        println!("XDG_CACHE_HOME={}", ctx.xdg_cache.display());
-        println!("TMPDIR={}", ctx.tmp.display());
-        println!("DENO_DIR={}", ctx.deno_dir.display());
-        println!(
-            "PLAYWRIGHT_BROWSERS_PATH={}",
-            ctx.playwright_browsers.display()
-        );
-        println!("BUN_INSTALL_CACHE_DIR={}", ctx.bun_cache.display());
+        println!("auto_clean={}", options.auto_clean || options.ephemeral);
+        println!("keep_on_error={}", options.keep_on_error);
+        println!("ephemeral={}", options.ephemeral);
+        if needs_ephemeral_install {
+            println!("ephemeral_install: {} install", tool);
+        }
+        print_env(ctx);
         return Ok(0);
     }
 
-    let status = Command::new(tool)
-        .args(&final_args)
+    let exit_code = run_command(ctx, tool, &final_args, cwd)?;
+
+    if install_like && exit_code == 0 {
+        sync_mutated_manifests_back(ctx)?;
+    }
+
+    if options.should_clean_after(exit_code) {
+        clean_after_command(ctx);
+    }
+
+    Ok(exit_code)
+}
+
+fn run_install_like(ctx: &RimContext, tool: &str, dry_run: bool) -> Result<u8, String> {
+    warn_about_low_rim_space(ctx);
+    sync_manifests_to_shadow(ctx)?;
+    let args = final_args(ctx, tool, vec![OsString::from("install")]);
+
+    if dry_run {
+        return Ok(0);
+    }
+
+    let code = run_command(ctx, tool, &args, &ctx.shadow_project)?;
+    if code == 0 {
+        sync_mutated_manifests_back(ctx)?;
+    }
+    Ok(code)
+}
+
+fn run_command(ctx: &RimContext, tool: &str, args: &[OsString], cwd: &Path) -> Result<u8, String> {
+    let _signals = SignalGuard::install();
+    let mut command = Command::new(tool);
+    command
+        .args(args)
         .current_dir(cwd)
         .env("npm_config_cache", &ctx.npm_cache)
         .env("XDG_CACHE_HOME", &ctx.xdg_cache)
         .env("TMPDIR", &ctx.tmp)
         .env("DENO_DIR", &ctx.deno_dir)
         .env("PLAYWRIGHT_BROWSERS_PATH", &ctx.playwright_browsers)
-        .env("BUN_INSTALL_CACHE_DIR", &ctx.bun_cache)
-        .status()
-        .map_err(|e| format!("failed to execute {tool}: {e}"))?;
+        .env("BUN_INSTALL_CACHE_DIR", &ctx.bun_cache);
 
-    if install_like && status.success() {
-        sync_mutated_manifests_back(ctx)?;
+    unsafe {
+        command.pre_exec(|| {
+            restore_default_signals();
+            Ok(())
+        });
     }
 
-    Ok(status.code().unwrap_or(1) as u8)
+    let status = command
+        .status()
+        .map_err(|e| format!("failed to execute {tool}: {e}"))?;
+    Ok(exit_status_code(status))
+}
+
+fn exit_status_code(status: ExitStatus) -> u8 {
+    status
+        .code()
+        .map(|code| code.clamp(0, 255) as u8)
+        .or_else(|| {
+            status
+                .signal()
+                .map(|signal| (128 + signal).clamp(0, 255) as u8)
+        })
+        .unwrap_or(1)
+}
+
+fn clean_after_command(ctx: &RimContext) {
+    if let Err(err) = clean(ctx) {
+        eprintln!("rim: warning: auto-clean failed: {err}");
+    }
+}
+
+fn should_ephemeral_install(tool: &str, args: &[OsString]) -> bool {
+    if !matches!(tool, "npm" | "pnpm" | "bun" | "yarn") {
+        return false;
+    }
+    let Some(first) = args.first().and_then(|arg| arg.to_str()) else {
+        return false;
+    };
+    matches!(first, "run" | "test" | "start")
+}
+
+fn dependencies_missing(ctx: &RimContext) -> bool {
+    if !ctx.node_modules.exists() {
+        return true;
+    }
+    let Ok(entries) = fs::read_dir(&ctx.node_modules) else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name() != ".rim-keep" {
+            return false;
+        }
+    }
+    true
+}
+
+fn print_env(ctx: &RimContext) {
+    println!("npm_config_cache={}", ctx.npm_cache.display());
+    println!("XDG_CACHE_HOME={}", ctx.xdg_cache.display());
+    println!("TMPDIR={}", ctx.tmp.display());
+    println!("DENO_DIR={}", ctx.deno_dir.display());
+    println!(
+        "PLAYWRIGHT_BROWSERS_PATH={}",
+        ctx.playwright_browsers.display()
+    );
+    println!("BUN_INSTALL_CACHE_DIR={}", ctx.bun_cache.display());
+}
+
+static SIGNAL_SEEN: AtomicBool = AtomicBool::new(false);
+const SIGINT: i32 = 2;
+const SIGTERM: i32 = 15;
+const SIG_DFL: usize = 0;
+
+type SignalHandler = usize;
+
+unsafe extern "C" {
+    fn signal(signum: i32, handler: SignalHandler) -> SignalHandler;
+}
+
+extern "C" fn record_signal(_signal: i32) {
+    SIGNAL_SEEN.store(true, Ordering::SeqCst);
+}
+
+struct SignalGuard {
+    previous_int: SignalHandler,
+    previous_term: SignalHandler,
+}
+
+impl SignalGuard {
+    fn install() -> Self {
+        SIGNAL_SEEN.store(false, Ordering::SeqCst);
+        let previous_int = unsafe { signal(SIGINT, record_signal as *const () as SignalHandler) };
+        let previous_term = unsafe { signal(SIGTERM, record_signal as *const () as SignalHandler) };
+        Self {
+            previous_int,
+            previous_term,
+        }
+    }
+}
+
+impl Drop for SignalGuard {
+    fn drop(&mut self) {
+        unsafe {
+            signal(SIGINT, self.previous_int);
+            signal(SIGTERM, self.previous_term);
+        }
+    }
+}
+
+fn restore_default_signals() {
+    unsafe {
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+    }
 }
 
 fn is_install_like(tool: &str, args: &[OsString]) -> bool {
