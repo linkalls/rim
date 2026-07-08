@@ -40,6 +40,11 @@ fn help_lists_cleanup_options() {
     for expected in [
         "rim ls",
         "rim gc",
+        "rim path",
+        "rim explain",
+        "--suggest",
+        "--cache-only",
+        "--deps-only",
         "--dry-run",
         "--auto-clean",
         "--ephemeral",
@@ -132,6 +137,86 @@ fn prepare_writes_metadata_and_ls_reports_layer() {
     assert!(stdout.contains("prepare"), "stdout: {stdout}");
     assert!(
         stdout.contains(&rim_dir.display().to_string()),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn path_command_prints_selected_paths() {
+    let project = make_project();
+    let base = unique_temp("base");
+
+    let out = Command::new(bin())
+        .arg("path")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("rim path");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.trim().starts_with(&base.display().to_string()),
+        "stdout: {stdout}"
+    );
+
+    let out = Command::new(bin())
+        .args(["path", "--node-modules"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("rim path node_modules");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.trim().ends_with("project/node_modules"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn explain_reports_install_plan_and_cache_trim() {
+    let project = make_project();
+    let base = unique_temp("base");
+
+    let out = Command::new(bin())
+        .args(["explain", "bun", "install"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("rim explain");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("install_like: true"), "stdout: {stdout}");
+    assert!(stdout.contains("sync manifests"), "stdout: {stdout}");
+    assert!(stdout.contains("trim bun cache"), "stdout: {stdout}");
+}
+
+#[test]
+fn doctor_suggest_reports_heavy_packages_and_scripts() {
+    let project = unique_temp("suggest-project");
+    let base = unique_temp("suggest-base");
+    fs::write(
+        project.join("package.json"),
+        "{\"dependencies\":{\"next\":\"16.0.0\"},\"scripts\":{\"postinstall\":\"prisma generate\"},\"workspaces\":[\"packages/*\"]}\n",
+    )
+    .expect("package.json");
+
+    let out = Command::new(bin())
+        .args(["doctor", "--suggest"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("rim doctor suggest");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("suggestions:"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("heavy packages detected: next"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("workspace detected"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("lifecycle scripts detected"),
         "stdout: {stdout}"
     );
 }
@@ -767,6 +852,91 @@ fn ephemeral_installs_before_run_preserves_exit_code_and_cleans() {
     assert!(
         !project.join("node_modules").exists(),
         "ephemeral should clean even when the requested command fails"
+    );
+}
+
+#[test]
+fn clean_cache_only_preserves_dependencies_and_removes_cache_dirs() {
+    let project = make_project();
+    let base = unique_temp("base");
+
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(prepare.status.success());
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir");
+    fs::create_dir_all(rim_dir.join("npm-cache")).expect("npm cache");
+    fs::write(rim_dir.join("npm-cache/blob"), "cache").expect("cache blob");
+    fs::create_dir_all(link_target.join("fake-pkg")).expect("fake dep");
+
+    let clean = Command::new(bin())
+        .args(["clean", "--cache-only"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("clean cache-only");
+    assert!(clean.status.success());
+    assert!(
+        project.join("node_modules").is_symlink(),
+        "deps symlink should remain"
+    );
+    assert!(
+        link_target.join("fake-pkg").exists(),
+        "dependencies should remain"
+    );
+    assert!(
+        !rim_dir.join("npm-cache").exists(),
+        "cache should be removed"
+    );
+}
+
+#[test]
+fn clean_deps_only_preserves_cache_and_metadata() {
+    let project = make_project();
+    let base = unique_temp("base");
+
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(prepare.status.success());
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir");
+    fs::create_dir_all(rim_dir.join("npm-cache")).expect("npm cache");
+    fs::write(rim_dir.join("npm-cache/blob"), "cache").expect("cache blob");
+    fs::create_dir_all(link_target.join("fake-pkg")).expect("fake dep");
+
+    let clean = Command::new(bin())
+        .args(["clean", "--deps-only"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("clean deps-only");
+    assert!(clean.status.success());
+    assert!(
+        !project.join("node_modules").exists(),
+        "project symlink should be removed"
+    );
+    assert!(!link_target.exists(), "dependency tree should be removed");
+    assert!(
+        rim_dir.join("npm-cache/blob").exists(),
+        "cache should remain"
+    );
+    assert!(
+        rim_dir.join(".rim-meta.json").exists(),
+        "metadata should remain"
     );
 }
 

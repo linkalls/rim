@@ -69,9 +69,8 @@ fn run() -> Result<u8, String> {
             Ok(0)
         }
         "clean" => {
-            clean(&ctx)?;
-            println!("cleaned: {}", ctx.rim_dir.display());
-            Ok(0)
+            let clean_args = args.split_off(1);
+            clean_command(&ctx, &clean_args)
         }
         "ls" => {
             list_layers(&ctx);
@@ -85,9 +84,17 @@ fn run() -> Result<u8, String> {
             status(&ctx);
             Ok(0)
         }
+        "path" => {
+            let path_args = args.split_off(1);
+            path_command(&ctx, &path_args)
+        }
+        "explain" => {
+            let explain_args = args.split_off(1);
+            explain(&ctx, &explain_args, options)
+        }
         "doctor" => {
-            doctor(&ctx);
-            Ok(0)
+            let doctor_args = args.split_off(1);
+            doctor_command(&ctx, &doctor_args)
         }
         "help" | "--help" | "-h" => {
             print_help();
@@ -132,10 +139,12 @@ fn print_help() {
 Usage:
   rim prepare
   rim status
-  rim doctor
-  rim clean
+  rim doctor [--suggest]
+  rim clean [--cache-only|--deps-only]
   rim ls
   rim gc [--dry-run] [--orphaned] [--older-than 1d] [--all]
+  rim path [--node-modules|--cache|--npm-cache|--bun-cache|--deno-cache|--shadow]
+  rim explain <bun|npm|deno|...> [args...]
   rim [--dry-run] [--auto-clean] [--ephemeral] [--keep-on-error] [--keep-cache] <bun|npm|deno|node|...> [args...]
 
 Options:
@@ -315,7 +324,70 @@ fn ensure_node_modules_link(ctx: &RimContext) -> Result<(), String> {
     }
 }
 
+fn clean_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
+    let mut cache_only = false;
+    let mut deps_only = false;
+    for arg in args {
+        match arg.to_str() {
+            Some("--cache-only") => cache_only = true,
+            Some("--deps-only") => deps_only = true,
+            Some(other) => return Err(format!("unknown clean option: {other}")),
+            None => return Err("clean options must be valid UTF-8".to_owned()),
+        }
+    }
+    if cache_only && deps_only {
+        return Err("--cache-only and --deps-only cannot be used together".to_owned());
+    }
+    if cache_only {
+        clean_cache(ctx)?;
+        println!("cleaned cache: {}", ctx.rim_dir.display());
+    } else if deps_only {
+        clean_deps(ctx)?;
+        println!("cleaned deps: {}", ctx.node_modules.display());
+    } else {
+        clean(ctx)?;
+        println!("cleaned: {}", ctx.rim_dir.display());
+    }
+    Ok(0)
+}
+
 fn clean(ctx: &RimContext) -> Result<(), String> {
+    clean_node_modules_link(ctx)?;
+    if ctx.rim_dir.exists() {
+        fs::remove_dir_all(&ctx.rim_dir)
+            .map_err(|e| format!("cannot remove {}: {e}", ctx.rim_dir.display()))?;
+    }
+    Ok(())
+}
+
+fn clean_deps(ctx: &RimContext) -> Result<(), String> {
+    clean_node_modules_link(ctx)?;
+    if ctx.node_modules.exists() {
+        fs::remove_dir_all(&ctx.node_modules)
+            .map_err(|e| format!("cannot remove {}: {e}", ctx.node_modules.display()))?;
+    }
+    Ok(())
+}
+
+fn clean_cache(ctx: &RimContext) -> Result<(), String> {
+    for path in [
+        &ctx.npm_cache,
+        &ctx.xdg_cache,
+        &ctx.tmp,
+        &ctx.deno_dir,
+        &ctx.playwright_browsers,
+        &ctx.bun_cache,
+        &ctx.pnpm_store,
+    ] {
+        if path.exists() {
+            fs::remove_dir_all(path)
+                .map_err(|e| format!("cannot remove cache {}: {e}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn clean_node_modules_link(ctx: &RimContext) -> Result<(), String> {
     let link = ctx.project_root.join("node_modules");
     if fs::symlink_metadata(&link)
         .map(|m| m.file_type().is_symlink())
@@ -327,11 +399,6 @@ fn clean(ctx: &RimContext) -> Result<(), String> {
             fs::remove_file(&link)
                 .map_err(|e| format!("cannot remove node_modules symlink: {e}"))?;
         }
-    }
-
-    if ctx.rim_dir.exists() {
-        fs::remove_dir_all(&ctx.rim_dir)
-            .map_err(|e| format!("cannot remove {}: {e}", ctx.rim_dir.display()))?;
     }
     Ok(())
 }
@@ -676,6 +743,153 @@ struct MemoryInfo {
     total_bytes: Option<u64>,
     available_bytes: Option<u64>,
     shmem_bytes: Option<u64>,
+}
+
+fn doctor_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
+    let mut suggest = false;
+    for arg in args {
+        match arg.to_str() {
+            Some("--suggest") => suggest = true,
+            Some(other) => return Err(format!("unknown doctor option: {other}")),
+            None => return Err("doctor options must be valid UTF-8".to_owned()),
+        }
+    }
+    doctor(ctx);
+    if suggest {
+        print_suggestions(ctx);
+    }
+    Ok(0)
+}
+
+fn path_command(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
+    let path = match args.first().and_then(|arg| arg.to_str()) {
+        None => &ctx.rim_dir,
+        Some("--node-modules") => &ctx.node_modules,
+        Some("--cache") => &ctx.rim_dir,
+        Some("--npm-cache") => &ctx.npm_cache,
+        Some("--bun-cache") => &ctx.bun_cache,
+        Some("--deno-cache") => &ctx.deno_dir,
+        Some("--shadow") => &ctx.shadow_project,
+        Some(other) => return Err(format!("unknown path option: {other}")),
+    };
+    if args.len() > 1 {
+        return Err("rim path accepts at most one selector".to_owned());
+    }
+    println!("{}", path.display());
+    Ok(0)
+}
+
+fn explain(ctx: &RimContext, args: &[OsString], options: CliOptions) -> Result<u8, String> {
+    let Some(tool) = args.first().and_then(|arg| arg.to_str()) else {
+        return Err("rim explain requires a tool, for example: rim explain bun install".to_owned());
+    };
+    let tool_args = args[1..].to_vec();
+    let install_like = is_install_like(tool, &tool_args);
+    let final_args = final_args(ctx, tool, tool_args);
+    let cwd = if install_like {
+        &ctx.shadow_project
+    } else {
+        &ctx.project_root
+    };
+
+    println!("tool: {tool}");
+    println!("args: {}", join_args(&final_args));
+    println!("install_like: {install_like}");
+    println!("cwd: {}", cwd.display());
+    println!("rim_dir: {}", ctx.rim_dir.display());
+    println!();
+    println!("rim will:");
+    println!("  1. prepare dependency-layer layout and metadata");
+    if install_like {
+        println!("  2. sync manifests to the shadow project");
+        println!(
+            "  3. run `{tool} {}` in the shadow project",
+            join_args(&final_args)
+        );
+        println!("  4. copy mutable manifests and lockfiles back on success");
+        if matches!(tool, "npm" | "bun") && !options.keep_cache {
+            println!("  5. trim {tool} cache unless --keep-cache is set");
+        } else if options.keep_cache {
+            println!("  5. keep package-manager cache because --keep-cache is set");
+        }
+    } else {
+        println!(
+            "  2. run `{tool} {}` in the real project",
+            join_args(&final_args)
+        );
+        println!("  3. leave source files in place and dependency mass outside the project");
+    }
+    if options.auto_clean || options.ephemeral {
+        println!("  cleanup. remove the dependency layer after the command exits");
+    }
+    if tool == "pnpm" {
+        println!();
+        println!(
+            "warning: pnpm support is experimental and may use significantly more RAM for its store."
+        );
+    }
+    Ok(0)
+}
+
+fn print_suggestions(ctx: &RimContext) {
+    println!();
+    println!("suggestions:");
+    let mut any = false;
+    if let Some(info) = storage_info_for(&ctx.rim_base)
+        && info.available_bytes < 1024 * 1024 * 1024
+    {
+        any = true;
+        println!(
+            "  - RIM_BASE has only {} available: {}",
+            format_bytes(info.available_bytes),
+            ctx.rim_base.display()
+        );
+        println!("    Try disk-backed mode:");
+        println!("      RIM_BASE=$HOME/.cache/rim rim bun install");
+    }
+    let risky = risky_packages(ctx);
+    if !risky.is_empty() {
+        any = true;
+        println!("  - heavy packages detected: {}", risky.join(", "));
+        println!("    tmpfs mode may be too large; consider $HOME/.cache/rim or external storage.");
+    }
+    if workspace_detected(ctx) {
+        any = true;
+        println!("  - workspace detected; shadow installs may need extra care.");
+    }
+    if lifecycle_scripts_detected(ctx) {
+        any = true;
+        println!(
+            "  - lifecycle scripts detected; postinstall/prepare hooks may assume real project cwd."
+        );
+    }
+    if rim_mode(ctx) == "tmpfs" && dir_size(&ctx.rim_base).unwrap_or(0) > 1024 * 1024 * 1024 {
+        any = true;
+        println!("  - RIM_BASE already contains more than 1 GB of layers.");
+        println!("    Try: rim ls");
+        println!("    Then: rim gc --dry-run --orphaned");
+    }
+    if !any {
+        println!("  - No obvious issues detected. npm/bun cache trim is enabled by default.");
+    }
+}
+
+fn risky_packages(ctx: &RimContext) -> Vec<&'static str> {
+    let package_json =
+        fs::read_to_string(ctx.project_root.join("package.json")).unwrap_or_default();
+    [
+        "next",
+        "playwright",
+        "electron",
+        "expo",
+        "react-native",
+        "sharp",
+        "prisma",
+        "puppeteer",
+    ]
+    .into_iter()
+    .filter(|name| package_json.contains(&format!("\"{name}\"")))
+    .collect()
 }
 
 fn doctor(ctx: &RimContext) {

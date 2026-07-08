@@ -19,9 +19,14 @@ Implemented:
 - `rim prepare`
 - `rim status`
 - `rim doctor`
+- `rim doctor --suggest`
 - `rim ls`
 - `rim gc`
+- `rim path`
+- `rim explain`
 - `rim clean`
+- `rim clean --cache-only`
+- `rim clean --deps-only`
 - `rim --auto-clean ...`
 - `rim --ephemeral ...`
 - `rim [--dry-run] npm ...`
@@ -80,6 +85,7 @@ Check storage/memory risk before installing:
 
 ```bash
 rim doctor
+rim doctor --suggest
 ```
 
 List dependency layers under the current `RIM_BASE`:
@@ -106,6 +112,13 @@ Remove the current project's dependency directory and `node_modules` symlink:
 rim clean
 ```
 
+Or remove only one part of the current layer:
+
+```bash
+rim clean --cache-only  # keep node_modules, remove cache dirs
+rim clean --deps-only   # keep cache dirs, remove node_modules layer + project symlink
+```
+
 Dry-run without executing the wrapped tool:
 
 ```bash
@@ -113,6 +126,26 @@ rim --dry-run npm install
 ```
 
 Dry-run still prepares the dependency-layer layout, `node_modules` symlink, and metadata so the printed paths/env match a real run.
+
+Print script-friendly paths:
+
+```bash
+rim path
+rim path --node-modules
+rim path --npm-cache
+rim path --bun-cache
+rim path --deno-cache
+rim path --shadow
+```
+
+Explain what `rim` would do for a command:
+
+```bash
+rim explain bun install
+rim explain bun run dev
+```
+
+`rim explain` does not create or remove anything; it only describes the plan.
 
 ## Auto-clean and ephemeral mode
 
@@ -286,6 +319,34 @@ risk:
 
 Install-like commands also warn when `RIM_BASE` has low available space.
 
+## Suggestions and explain mode
+
+`rim doctor --suggest` prints normal doctor output and then adds practical next steps:
+
+```txt
+suggestions:
+  - heavy packages detected: next
+    tmpfs mode may be too large; consider $HOME/.cache/rim or external storage.
+  - workspace detected; shadow installs may need extra care.
+  - lifecycle scripts detected; postinstall/prepare hooks may assume real project cwd.
+```
+
+`rim explain` is a dry educational view of a wrapped command:
+
+```txt
+tool: bun
+args: install
+install_like: true
+cwd: /dev/shm/rim/app-<hash>/project
+
+rim will:
+  1. prepare dependency-layer layout and metadata
+  2. sync manifests to the shadow project
+  3. run `bun install` in the shadow project
+  4. copy mutable manifests and lockfiles back on success
+  5. trim bun cache unless --keep-cache is set
+```
+
 ## Measured impact
 
 `rim` is not a compression tool. It moves dependency weight away from
@@ -384,7 +445,7 @@ Current suite:
 
 - prepares `node_modules` symlink into RAM base
 - refuses to overwrite a real `node_modules` directory
-- help lists cleanup and inventory options
+- help lists cleanup, inventory, path, explain, and suggestion options
 - dry-run reports command, `RIM_BASE`, cleanup flags, and cache envs
 - `rim doctor` reports storage/memory risk and project warning signals
 - status/doctor usage counts symlinks without following external targets
@@ -395,6 +456,10 @@ Current suite:
 - `.rim-meta.json` powers `rim ls` and metadata-based `rim gc`
 - `rim gc --dry-run --orphaned` previews orphaned layer cleanup
 - `rim gc --orphaned` removes orphaned layers
+- `rim path` prints script-friendly dependency-layer paths
+- `rim explain` reports the command plan without changing files
+- `rim doctor --suggest` reports practical storage/project suggestions
+- `rim clean --cache-only` and `rim clean --deps-only` remove only one side of the layer
 - `bunfig.toml` is synced to the shadow project
 - npm/bun install-like commands trim package-manager cache by default; `--keep-cache` preserves it
 - pnpm is experimental/opt-in and injects `--store-dir` when used
