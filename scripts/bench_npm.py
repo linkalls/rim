@@ -230,12 +230,13 @@ def bench_one(package_set: PackageSet, workdir: Path, rim_base: Path, keep: bool
 
 def format_bytes(value: int) -> str:
     units = ["B", "KB", "MB", "GB"]
-    amount = float(value)
+    sign = "-" if value < 0 else ""
+    amount = float(abs(value))
     for unit in units:
         if amount < 1024 or unit == units[-1]:
             if unit == "B":
-                return f"{int(amount)} B"
-            return f"{amount:.1f} {unit}"
+                return f"{sign}{int(amount)} B"
+            return f"{sign}{amount:.1f} {unit}"
         amount /= 1024
     return f"{value} B"
 
@@ -278,9 +279,14 @@ def main() -> int:
         normal = result["normal"]["total_persistent_lstat_bytes"]
         persistent = result["rim"]["total_persistent_lstat_bytes"]
         ram = result["rim"]["ram_lstat_bytes"]
+        overhead = result["rim_ram_overhead_lstat_bytes"]
+        overhead_prefix = "+" if overhead >= 0 else ""
         print(
             f"{result['name']}: persistent {format_bytes(normal)} -> {format_bytes(persistent)}, "
-            f"rim RAM {format_bytes(ram)}, saved {result['saved_persistent_percent']}%"
+            f"rim RAM {format_bytes(ram)} "
+            f"({result['ram_vs_normal_persistent_percent']:.2f}% of normal, "
+            f"overhead {overhead_prefix}{format_bytes(overhead)}), "
+            f"saved {result['saved_persistent_percent']:.2f}%"
         )
 
     return 0
