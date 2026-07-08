@@ -6,6 +6,7 @@ use std::os::unix::fs::symlink;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 struct RimContext {
@@ -63,6 +64,7 @@ fn run() -> Result<u8, String> {
         "prepare" => {
             ensure_layout(&ctx)?;
             sync_manifests_to_shadow(&ctx)?;
+            write_meta(&ctx, "prepare")?;
             print_context(&ctx);
             Ok(0)
         }
@@ -70,6 +72,14 @@ fn run() -> Result<u8, String> {
             clean(&ctx)?;
             println!("cleaned: {}", ctx.rim_dir.display());
             Ok(0)
+        }
+        "ls" => {
+            list_layers(&ctx);
+            Ok(0)
+        }
+        "gc" => {
+            let gc_args = args.split_off(1);
+            gc(&ctx, &gc_args)
         }
         "status" => {
             status(&ctx);
@@ -124,6 +134,8 @@ Usage:
   rim status
   rim doctor
   rim clean
+  rim ls
+  rim gc [--dry-run] [--orphaned] [--older-than 1d] [--all]
   rim [--dry-run] [--auto-clean] [--ephemeral] [--keep-on-error] [--keep-cache] <bun|npm|deno|node|...> [args...]
 
 Options:
@@ -259,6 +271,7 @@ fn manifest_names() -> &'static [&'static str] {
         "pnpm-lock.yaml",
         "bun.lock",
         "bun.lockb",
+        "bunfig.toml",
         "yarn.lock",
         ".npmrc",
     ]
@@ -272,6 +285,7 @@ fn mutable_manifest_names() -> &'static [&'static str] {
         "pnpm-lock.yaml",
         "bun.lock",
         "bun.lockb",
+        "bunfig.toml",
         "yarn.lock",
     ]
 }
@@ -330,6 +344,321 @@ fn status(ctx: &RimContext) {
     println!("node_modules: {}", ctx.node_modules.display());
     let bytes = dir_size(&ctx.rim_dir).unwrap_or(0);
     println!("rim_size_bytes: {bytes}");
+}
+
+#[derive(Debug, Clone)]
+struct RimMeta {
+    project_root: String,
+    created_at: u64,
+    last_used_at: u64,
+    manager: String,
+    mode: String,
+    rim_version: String,
+}
+
+#[derive(Debug, Clone)]
+struct LayerInfo {
+    rim_dir: PathBuf,
+    meta: Option<RimMeta>,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GcOptions {
+    dry_run: bool,
+    all: bool,
+    orphaned: bool,
+    older_than_seconds: Option<u64>,
+}
+
+fn write_meta(ctx: &RimContext, manager: &str) -> Result<(), String> {
+    let now = now_unix();
+    let existing = read_meta(&ctx.rim_dir);
+    let created_at = existing.as_ref().map_or(now, |meta| meta.created_at);
+    let contents = format!(
+        "{{\n  \"project_root\": \"{}\",\n  \"created_at\": {},\n  \"last_used_at\": {},\n  \"manager\": \"{}\",\n  \"mode\": \"{}\",\n  \"rim_version\": \"{}\"\n}}\n",
+        json_escape(&ctx.project_root.to_string_lossy()),
+        created_at,
+        now,
+        json_escape(manager),
+        json_escape(&rim_mode(ctx)),
+        json_escape(env!("CARGO_PKG_VERSION"))
+    );
+    fs::write(ctx.rim_dir.join(".rim-meta.json"), contents)
+        .map_err(|e| format!("cannot write rim metadata: {e}"))
+}
+
+fn read_meta(rim_dir: &Path) -> Option<RimMeta> {
+    let contents = fs::read_to_string(rim_dir.join(".rim-meta.json")).ok()?;
+    Some(RimMeta {
+        project_root: json_string_field(&contents, "project_root")?,
+        created_at: json_u64_field(&contents, "created_at")?,
+        last_used_at: json_u64_field(&contents, "last_used_at")?,
+        manager: json_string_field(&contents, "manager").unwrap_or_else(|| "unknown".to_owned()),
+        mode: json_string_field(&contents, "mode").unwrap_or_else(|| "unknown".to_owned()),
+        rim_version: json_string_field(&contents, "rim_version")
+            .unwrap_or_else(|| "unknown".to_owned()),
+    })
+}
+
+fn list_layers(ctx: &RimContext) {
+    let layers = collect_layers(ctx);
+    println!(
+        "{:<36} {:<10} {:<8} {:>10} {:>8} {:>10} {:<8}  LAYER",
+        "PROJECT", "MANAGER", "MODE", "SIZE", "AGE", "LAST_USED", "VERSION"
+    );
+    for layer in layers {
+        let project = layer
+            .meta
+            .as_ref()
+            .map(|meta| shorten_project(&meta.project_root))
+            .unwrap_or_else(|| "(unknown)".to_owned());
+        let manager = layer
+            .meta
+            .as_ref()
+            .map(|meta| meta.manager.as_str())
+            .unwrap_or("unknown");
+        let mode = layer
+            .meta
+            .as_ref()
+            .map(|meta| meta.mode.as_str())
+            .unwrap_or("unknown");
+        let now = now_unix();
+        let age = layer
+            .meta
+            .as_ref()
+            .map(|meta| format_age(now.saturating_sub(meta.created_at)))
+            .unwrap_or_else(|| "unknown".to_owned());
+        let last_used = layer
+            .meta
+            .as_ref()
+            .map(|meta| format_age(now.saturating_sub(meta.last_used_at)))
+            .unwrap_or_else(|| "unknown".to_owned());
+        let version = layer
+            .meta
+            .as_ref()
+            .map(|meta| meta.rim_version.as_str())
+            .unwrap_or("unknown");
+        println!(
+            "{project:<36} {manager:<10} {mode:<8} {:>10} {:>8} {:>10} {version:<8}  {}",
+            format_bytes(layer.size_bytes),
+            age,
+            last_used,
+            layer.rim_dir.display()
+        );
+    }
+}
+
+fn gc(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
+    let mut options = parse_gc_options(args)?;
+    if !options.all && !options.orphaned && options.older_than_seconds.is_none() {
+        options.dry_run = true;
+        options.orphaned = true;
+        println!("rim gc: defaulting to --dry-run --orphaned");
+    }
+
+    let now = now_unix();
+    let mut matched = 0_u64;
+    let mut bytes = 0_u64;
+    for layer in collect_layers(ctx) {
+        if !gc_matches(&layer, &options, now) {
+            continue;
+        }
+        matched += 1;
+        bytes = bytes.saturating_add(layer.size_bytes);
+        if options.dry_run {
+            println!(
+                "would remove {}  {}",
+                format_bytes(layer.size_bytes),
+                layer.rim_dir.display()
+            );
+        } else {
+            println!(
+                "removing {}  {}",
+                format_bytes(layer.size_bytes),
+                layer.rim_dir.display()
+            );
+            remove_layer(ctx, &layer.rim_dir)?;
+        }
+    }
+    let action = if options.dry_run {
+        "would remove"
+    } else {
+        "removed"
+    };
+    println!(
+        "rim gc: {action} {matched} layer(s), {}",
+        format_bytes(bytes)
+    );
+    Ok(0)
+}
+
+fn parse_gc_options(args: &[OsString]) -> Result<GcOptions, String> {
+    let mut options = GcOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        let Some(arg) = args[i].to_str() else {
+            return Err("gc options must be valid UTF-8".to_owned());
+        };
+        match arg {
+            "--dry-run" => options.dry_run = true,
+            "--all" => options.all = true,
+            "--orphaned" => options.orphaned = true,
+            "--older-than" => {
+                i += 1;
+                let Some(value) = args.get(i).and_then(|arg| arg.to_str()) else {
+                    return Err("--older-than requires a value like 1d, 6h, or 30m".to_owned());
+                };
+                options.older_than_seconds = Some(parse_duration_seconds(value)?);
+            }
+            _ => return Err(format!("unknown gc option: {arg}")),
+        }
+        i += 1;
+    }
+    Ok(options)
+}
+
+fn parse_duration_seconds(value: &str) -> Result<u64, String> {
+    let (number, unit) = value.split_at(
+        value
+            .trim_end_matches(|c: char| c.is_ascii_alphabetic())
+            .len(),
+    );
+    let amount = number
+        .parse::<u64>()
+        .map_err(|_| format!("invalid duration: {value}"))?;
+    match unit {
+        "" | "s" => Ok(amount),
+        "m" => Ok(amount.saturating_mul(60)),
+        "h" => Ok(amount.saturating_mul(60 * 60)),
+        "d" => Ok(amount.saturating_mul(60 * 60 * 24)),
+        _ => Err(format!(
+            "unsupported duration unit in {value}; use s, m, h, or d"
+        )),
+    }
+}
+
+fn gc_matches(layer: &LayerInfo, options: &GcOptions, now: u64) -> bool {
+    if options.all {
+        return true;
+    }
+    if options.orphaned
+        && layer
+            .meta
+            .as_ref()
+            .is_some_and(|meta| !Path::new(&meta.project_root).exists())
+    {
+        return true;
+    }
+    if let Some(older_than) = options.older_than_seconds
+        && layer
+            .meta
+            .as_ref()
+            .is_some_and(|meta| now.saturating_sub(meta.last_used_at) >= older_than)
+    {
+        return true;
+    }
+    false
+}
+
+fn remove_layer(ctx: &RimContext, rim_dir: &Path) -> Result<(), String> {
+    if rim_dir == ctx.rim_dir {
+        return clean(ctx);
+    }
+    fs::remove_dir_all(rim_dir).map_err(|e| format!("cannot remove {}: {e}", rim_dir.display()))
+}
+
+fn collect_layers(ctx: &RimContext) -> Vec<LayerInfo> {
+    let Ok(entries) = fs::read_dir(&ctx.rim_base) else {
+        return Vec::new();
+    };
+    let mut layers = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .map(|rim_dir| LayerInfo {
+            size_bytes: dir_size(&rim_dir).unwrap_or(0),
+            meta: read_meta(&rim_dir),
+            rim_dir,
+        })
+        .collect::<Vec<_>>();
+    layers.sort_by_key(|layer| {
+        layer
+            .meta
+            .as_ref()
+            .map_or(u64::MAX, |meta| meta.last_used_at)
+    });
+    layers
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn json_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+fn json_string_field(contents: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let rest = contents.split_once(&needle)?.1;
+    let rest = rest.split_once(':')?.1.trim_start();
+    let mut chars = rest.strip_prefix('"')?.chars();
+    let mut value = String::new();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => return Some(value),
+            '\\' => match chars.next()? {
+                'n' => value.push('\n'),
+                'r' => value.push('\r'),
+                't' => value.push('\t'),
+                other => value.push(other),
+            },
+            other => value.push(other),
+        }
+    }
+    None
+}
+
+fn json_u64_field(contents: &str, key: &str) -> Option<u64> {
+    let needle = format!("\"{key}\"");
+    let rest = contents.split_once(&needle)?.1;
+    let rest = rest.split_once(':')?.1.trim_start();
+    let digits = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    digits.parse::<u64>().ok()
+}
+
+fn shorten_project(project: &str) -> String {
+    if let Some(home) = env::var_os("HOME") {
+        let home = home.to_string_lossy();
+        if let Some(rest) = project.strip_prefix(home.as_ref()) {
+            return format!("~{rest}");
+        }
+    }
+    project.to_owned()
+}
+
+fn format_age(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 60 * 60 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 60 * 60 * 24 {
+        format!("{}h", seconds / (60 * 60))
+    } else {
+        format!("{}d", seconds / (60 * 60 * 24))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -662,6 +991,7 @@ fn run_tool(
     }
 
     ensure_layout(ctx)?;
+    write_meta(ctx, tool)?;
 
     let needs_ephemeral_install = options.ephemeral
         && !install_like

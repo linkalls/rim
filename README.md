@@ -19,6 +19,8 @@ Implemented:
 - `rim prepare`
 - `rim status`
 - `rim doctor`
+- `rim ls`
+- `rim gc`
 - `rim clean`
 - `rim --auto-clean ...`
 - `rim --ephemeral ...`
@@ -28,6 +30,8 @@ Implemented:
 - RAM-backed npm cache / Deno cache / Bun cache envs
 - install-like commands run in a shadow project so npm cannot replace the project symlink with a real directory
 - generated lockfiles are copied back to the real project after successful install-like commands
+- `.rim-meta.json` is written into each dependency layer for `rim ls` / `rim gc`
+- `bunfig.toml` is copied into the shadow project for Bun installs
 
 No external Rust dependencies are used.
 
@@ -78,17 +82,37 @@ Check storage/memory risk before installing:
 rim doctor
 ```
 
+List dependency layers under the current `RIM_BASE`:
+
+```bash
+rim ls
+```
+
+Garbage-collect old or orphaned dependency layers:
+
+```bash
+rim gc --dry-run --orphaned
+rim gc --orphaned
+rim gc --dry-run --older-than 1d
+rim gc --older-than 1d
+rim gc --dry-run --all
+```
+
+`rim gc` with no selector is safe by default: it behaves like `rim gc --dry-run --orphaned`.
+
 Remove the current project's dependency directory and `node_modules` symlink:
 
 ```bash
 rim clean
 ```
 
-Dry-run without executing the tool:
+Dry-run without executing the wrapped tool:
 
 ```bash
 rim --dry-run npm install
 ```
+
+Dry-run still prepares the dependency-layer layout, `node_modules` symlink, and metadata so the printed paths/env match a real run.
 
 ## Auto-clean and ephemeral mode
 
@@ -140,9 +164,11 @@ For a project like:
 
 ```txt
 /dev/shm/rim/app-<hash>/
+  .rim-meta.json
   project/
     package.json
     package-lock.json
+    bunfig.toml
     node_modules/
   npm-cache/    # created only when npm uses it; trimmed after successful npm installs by default
   deno-cache/
@@ -156,6 +182,8 @@ The real project gets:
 ```txt
 node_modules -> /dev/shm/rim/app-<hash>/project/node_modules
 ```
+
+Each layer also gets `.rim-meta.json` so `rim ls` and `rim gc` can reverse-map a dependency layer back to its source project, manager, mode, created time, and last-used time.
 
 For install-like commands (`install`, `i`, `add`, `remove`, `rm`, `update`, `up`, `ci`), `rim` runs the package manager inside the RAM shadow project. This matters because `npm install` may replace a pre-existing `node_modules` symlink if it is run directly in the source project.
 
@@ -201,6 +229,28 @@ BUN_INSTALL_CACHE_DIR=<rim-dir>/bun-cache
 `rim` can still run arbitrary commands, but pnpm is not a recommended target for the RAM/tmpfs mode. Its store model showed large RAM overhead in benchmarking, so pnpm is treated as experimental/opt-in rather than part of the main support path.
 
 After successful npm/bun install-like commands, `rim` trims the package-manager cache directory by default. The installed `node_modules` dependency tree remains. Use `--keep-cache` if you prefer faster repeated installs over minimum RAM usage.
+
+## Layer inventory and garbage collection
+
+`rim ls` shows every dependency layer under the active `RIM_BASE`:
+
+```txt
+PROJECT                              MANAGER    MODE           SIZE      AGE  LAST_USED VERSION   LAYER
+~/code/tiny-hono                     bun        tmpfs       18.3 MB      12m        1m 0.1.0     /dev/shm/rim/tiny-hono-a1b2c3d4
+~/code/test-vite                     npm        tmpfs       92.1 MB       2h        1h 0.1.0     /dev/shm/rim/test-vite-b5c6d7e8
+```
+
+`rim gc` removes dependency layers by metadata:
+
+```bash
+rim gc --dry-run --orphaned   # show layers whose source project no longer exists
+rim gc --orphaned             # remove orphaned layers
+rim gc --dry-run --older-than 1d
+rim gc --older-than 1d
+rim gc --dry-run --all
+```
+
+With no selector, `rim gc` is intentionally safe and only previews orphaned layers.
 
 ## Doctor
 
@@ -334,7 +384,7 @@ Current suite:
 
 - prepares `node_modules` symlink into RAM base
 - refuses to overwrite a real `node_modules` directory
-- help lists cleanup options
+- help lists cleanup and inventory options
 - dry-run reports command, `RIM_BASE`, cleanup flags, and cache envs
 - `rim doctor` reports storage/memory risk and project warning signals
 - status/doctor usage counts symlinks without following external targets
@@ -342,6 +392,10 @@ Current suite:
 - `--ephemeral` auto-installs missing dependencies for run/test/start commands and cleans afterward
 - install-like commands warn when `RIM_BASE` is low on space
 - install-like commands with `--auto-clean` warn that dependencies will be removed while manifest changes remain
+- `.rim-meta.json` powers `rim ls` and metadata-based `rim gc`
+- `rim gc --dry-run --orphaned` previews orphaned layer cleanup
+- `rim gc --orphaned` removes orphaned layers
+- `bunfig.toml` is synced to the shadow project
 - npm/bun install-like commands trim package-manager cache by default; `--keep-cache` preserves it
 - pnpm is experimental/opt-in and injects `--store-dir` when used
 - install-like commands run in RAM shadow project and copy lockfiles back

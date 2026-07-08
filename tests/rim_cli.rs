@@ -38,10 +38,13 @@ fn help_lists_cleanup_options() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     for expected in [
+        "rim ls",
+        "rim gc",
         "--dry-run",
         "--auto-clean",
         "--ephemeral",
         "--keep-on-error",
+        "--keep-cache",
     ] {
         assert!(stdout.contains(expected), "stdout: {stdout}");
     }
@@ -84,6 +87,52 @@ fn prepare_links_node_modules_to_ram_base_and_keeps_source_on_disk() {
     assert!(
         project.join("package.json").exists(),
         "source files stay in project directory"
+    );
+}
+
+#[test]
+fn prepare_writes_metadata_and_ls_reports_layer() {
+    let project = make_project();
+    let base = unique_temp("base");
+
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(
+        prepare.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&prepare.stderr)
+    );
+
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir");
+    let meta = fs::read_to_string(rim_dir.join(".rim-meta.json")).expect("rim metadata");
+    assert!(meta.contains("\"project_root\""), "meta: {meta}");
+    assert!(meta.contains("\"manager\": \"prepare\""), "meta: {meta}");
+    assert!(
+        meta.contains(&project.to_string_lossy().to_string()),
+        "meta should contain project path: {meta}"
+    );
+
+    let out = Command::new(bin())
+        .arg("ls")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("rim ls");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("PROJECT"), "stdout: {stdout}");
+    assert!(stdout.contains("prepare"), "stdout: {stdout}");
+    assert!(
+        stdout.contains(&rim_dir.display().to_string()),
+        "stdout: {stdout}"
     );
 }
 
@@ -275,6 +324,32 @@ fn prepare_shadow_removes_stale_manifests_absent_from_source() {
 }
 
 #[test]
+fn bunfig_toml_is_synced_to_shadow_project() {
+    let project = make_project();
+    let base = unique_temp("base");
+    fs::write(project.join("bunfig.toml"), "[install]\nexact = true\n").expect("bunfig");
+
+    let out = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let shadow_project = link_target.parent().expect("shadow project");
+    assert!(
+        shadow_project.join("bunfig.toml").exists(),
+        "bunfig.toml should be copied to the shadow project"
+    );
+}
+
+#[test]
 fn pnpm_wrapper_injects_store_dir_before_subcommand() {
     let project = make_project();
     let base = unique_temp("base");
@@ -379,6 +454,52 @@ fn status_counts_symlinks_without_following_targets() {
         size < 200_000,
         "status should count the symlink itself, not the 1 MiB target; stdout: {stdout}"
     );
+}
+
+#[test]
+fn gc_dry_run_and_orphaned_cleanup_use_metadata() {
+    let project = make_project();
+    let driver = make_project();
+    let base = unique_temp("base");
+
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(prepare.status.success());
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir")
+        .to_path_buf();
+    assert!(rim_dir.exists());
+
+    fs::remove_dir_all(&project).expect("remove source project to orphan layer");
+
+    let dry_run = Command::new(bin())
+        .args(["gc", "--dry-run", "--orphaned"])
+        .env("RIM_BASE", &base)
+        .current_dir(&driver)
+        .output()
+        .expect("gc dry-run");
+    assert!(dry_run.status.success());
+    let stdout = String::from_utf8_lossy(&dry_run.stdout);
+    assert!(stdout.contains("would remove"), "stdout: {stdout}");
+    assert!(rim_dir.exists(), "dry-run should not remove layer");
+
+    let gc = Command::new(bin())
+        .args(["gc", "--orphaned"])
+        .env("RIM_BASE", &base)
+        .current_dir(&driver)
+        .output()
+        .expect("gc orphaned");
+    assert!(gc.status.success());
+    let stdout = String::from_utf8_lossy(&gc.stdout);
+    assert!(stdout.contains("removed 1 layer"), "stdout: {stdout}");
+    assert!(!rim_dir.exists(), "orphaned layer should be removed");
 }
 
 #[test]
