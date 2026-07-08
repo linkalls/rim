@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,6 +26,25 @@ fn make_project() -> PathBuf {
     )
     .expect("package.json");
     project
+}
+
+#[test]
+fn help_lists_cleanup_options() {
+    let out = Command::new(bin())
+        .arg("--help")
+        .output()
+        .expect("run rim --help");
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for expected in [
+        "--dry-run",
+        "--auto-clean",
+        "--ephemeral",
+        "--keep-on-error",
+    ] {
+        assert!(stdout.contains(expected), "stdout: {stdout}");
+    }
 }
 
 #[test]
@@ -315,6 +335,53 @@ fn doctor_reports_storage_and_project_risk_signals() {
 }
 
 #[test]
+fn status_counts_symlinks_without_following_targets() {
+    let project = make_project();
+    let base = unique_temp("base");
+    let outside = unique_temp("outside");
+    let outside_file = outside.join("big-file.bin");
+    fs::write(&outside_file, vec![0_u8; 1024 * 1024]).expect("outside file");
+
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(
+        prepare.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&prepare.stderr)
+    );
+
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir");
+    symlink(&outside_file, rim_dir.join("outside-big-file")).expect("external symlink");
+
+    let out = Command::new(bin())
+        .arg("status")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("status");
+    assert!(out.status.success());
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let size = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("rim_size_bytes: "))
+        .and_then(|value| value.parse::<u64>().ok())
+        .expect("rim_size_bytes");
+    assert!(
+        size < 200_000,
+        "status should count the symlink itself, not the 1 MiB target; stdout: {stdout}"
+    );
+}
+
+#[test]
 fn auto_clean_removes_layer_after_success() {
     let project = make_project();
     let base = unique_temp("base");
@@ -410,7 +477,7 @@ fn auto_clean_install_warns_keeps_manifests_and_removes_dependencies() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("--auto-clean after install will remove installed dependencies"),
+        stderr.contains("cleanup after install will remove installed dependencies"),
         "stderr: {stderr}"
     );
     assert!(

@@ -119,7 +119,7 @@ Notes:
 rim --auto-clean --keep-on-error bun test
 ```
 
-If you use `--auto-clean` with an install-like command, `rim` warns because the installed dependency tree will be removed immediately after install finishes. Manifest and lockfile changes are still copied back to the real project.
+If you use cleanup mode with an install-like command, `rim` warns because the installed dependency tree will be removed immediately after install finishes. Manifest and lockfile changes are still copied back to the real project.
 
 ```bash
 rim --auto-clean bun install
@@ -134,7 +134,7 @@ rim --ephemeral bun test
 rim --ephemeral npm run dev
 ```
 
-This is the intended mode for cloning a small repo, trying it once, then leaving only source and lockfile changes behind. `Ctrl+C`/SIGINT is handled so the parent `rim` process can clean after the child exits.
+This is the intended mode for cloning a small repo, trying it once, then leaving only source and lockfile changes behind. `Ctrl+C`/SIGINT is best-effort handled so `rim` can usually clean after the child exits.
 
 ## How it works
 
@@ -144,7 +144,7 @@ For a project like:
 /home/poteto/code/app
 ```
 
-`rim` creates:
+`rim` creates a minimal base layout, then package-manager cache directories appear only when the wrapped tool uses them:
 
 ```txt
 /dev/shm/rim/app-<hash>/
@@ -289,19 +289,19 @@ Measurement: tree walk using lstat, so symlink targets are not counted as projec
 
 | Package set | Dependencies | Normal persistent | rim persistent | rim RAM | RAM vs normal | RAM overhead | Saved persistent | Time normal | Time rim |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| tiny-validation | `is-number`, `zod` | 7.6 MB | 5.2 KB | 8.8 MB | 115.82% | +1.2 MB | 99.93% | 1.376s | 1.379s |
-| utility-client | `axios`, `dayjs`, `lodash` | 9.8 MB | 14.9 KB | 10.0 MB | 101.86% | +186.2 KB | 99.85% | 2.186s | 2.422s |
-| hono-api | `@hono/node-server`, `hono`, `zod` | 16.9 MB | 5.6 KB | 17.3 MB | 102.05% | +355.2 KB | 99.97% | 1.774s | 1.955s |
-| react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 198.6 MB | 32.8 KB | 198.4 MB | 99.90% | -208.2 KB | 99.98% | 8.408s | 8.448s |
-| next-app | `next`, `react`, `react-dom`, `typescript` | 549.7 MB | 34.0 KB | 546.6 MB | 99.45% | -3.0 MB | 99.99% | 14.154s | 14.299s |
+| tiny-validation | `is-number`, `zod` | 7.6 MB | 5.2 KB | 8.8 MB | 115.82% | +1.2 MB | 99.93% | 1.217s | 1.415s |
+| utility-client | `axios`, `dayjs`, `lodash` | 9.8 MB | 14.9 KB | 10.0 MB | 101.86% | +186.2 KB | 99.85% | 2.322s | 2.445s |
+| hono-api | `@hono/node-server`, `hono`, `zod` | 16.9 MB | 5.6 KB | 17.3 MB | 102.05% | +355.1 KB | 99.97% | 1.766s | 1.913s |
+| react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 198.6 MB | 32.8 KB | 198.4 MB | 99.90% | -208.0 KB | 99.98% | 8.553s | 9.013s |
+| next-app | `next`, `react`, `react-dom`, `typescript` | 549.7 MB | 34.0 KB | 546.6 MB | 99.45% | -3.0 MB | 99.99% | 14.766s | 14.621s |
 
 Latest benchmark summary output:
 
 ```txt
 tiny-validation: persistent 7.6 MB -> 5.2 KB, rim RAM 8.8 MB (115.82% of normal, overhead +1.2 MB), saved 99.93%
 utility-client: persistent 9.8 MB -> 14.9 KB, rim RAM 10.0 MB (101.86% of normal, overhead +186.2 KB), saved 99.85%
-hono-api: persistent 16.9 MB -> 5.6 KB, rim RAM 17.3 MB (102.05% of normal, overhead +355.2 KB), saved 99.97%
-react-vite-ts: persistent 198.6 MB -> 32.8 KB, rim RAM 198.4 MB (99.90% of normal, overhead -208.2 KB), saved 99.98%
+hono-api: persistent 16.9 MB -> 5.6 KB, rim RAM 17.3 MB (102.05% of normal, overhead +355.1 KB), saved 99.97%
+react-vite-ts: persistent 198.6 MB -> 32.8 KB, rim RAM 198.4 MB (99.90% of normal, overhead -208.0 KB), saved 99.98%
 next-app: persistent 549.7 MB -> 34.0 KB, rim RAM 546.6 MB (99.45% of normal, overhead -3.0 MB), saved 99.99%
 ```
 
@@ -332,8 +332,10 @@ Current suite:
 
 - prepares `node_modules` symlink into RAM base
 - refuses to overwrite a real `node_modules` directory
+- help lists cleanup options
 - dry-run reports command, `RIM_BASE`, cleanup flags, and cache envs
 - `rim doctor` reports storage/memory risk and project warning signals
+- status/doctor usage counts symlinks without following external targets
 - `--auto-clean` removes the current dependency layer after wrapped commands while preserving exit codes
 - `--ephemeral` auto-installs missing dependencies for run/test/start commands and cleans afterward
 - install-like commands warn when `RIM_BASE` is low on space

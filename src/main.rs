@@ -6,7 +6,6 @@ use std::os::unix::fs::symlink;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone)]
 struct RimContext {
@@ -116,7 +115,23 @@ fn parse_options(args: &mut Vec<OsString>) -> Result<CliOptions, String> {
 
 fn print_help() {
     println!(
-        "rim - RAM dependency wrapper\n\nUsage:\n  rim prepare\n  rim status\n  rim doctor\n  rim clean\n  rim [--dry-run] <bun|npm|pnpm|deno|node|...> [args...]\n\nEnvironment:\n  RIM_BASE   dependency layer base directory, default /dev/shm/rim"
+        "rim - dependency layer wrapper
+
+Usage:
+  rim prepare
+  rim status
+  rim doctor
+  rim clean
+  rim [--dry-run] [--auto-clean] [--ephemeral] [--keep-on-error] <bun|npm|pnpm|deno|node|...> [args...]
+
+Options:
+  --dry-run        Show command/env without executing
+  --auto-clean     Clean dependency layer after command exits
+  --ephemeral      Fresh one-shot mode; implies --auto-clean
+  --keep-on-error  Preserve layer when wrapped command fails
+
+Environment:
+  RIM_BASE   dependency layer base directory, default /dev/shm/rim"
     );
 }
 
@@ -184,18 +199,9 @@ fn short_hash(path: &Path) -> String {
 }
 
 fn ensure_layout(ctx: &RimContext) -> Result<(), String> {
-    for dir in [
-        &ctx.rim_dir,
-        &ctx.shadow_project,
-        &ctx.node_modules,
-        &ctx.npm_cache,
-        &ctx.xdg_cache,
-        &ctx.tmp,
-        &ctx.deno_dir,
-        &ctx.playwright_browsers,
-        &ctx.bun_cache,
-        &ctx.pnpm_store,
-    ] {
+    // Keep the base layout minimal. Tool-specific cache directories are created
+    // lazily by the wrapped package manager only when it actually uses them.
+    for dir in [&ctx.rim_dir, &ctx.shadow_project, &ctx.node_modules] {
         fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
     fs::write(ctx.node_modules.join(".rim-keep"), b"")
@@ -613,17 +619,16 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 fn dir_size(path: &Path) -> io::Result<u64> {
-    if !path.exists() {
-        return Ok(0);
-    }
-    let mut total = 0;
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let meta = entry.metadata()?;
-        if meta.is_dir() {
-            total += dir_size(&entry.path())?;
-        } else {
-            total += meta.len();
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
+    };
+
+    let mut total = meta.len();
+    if meta.is_dir() && !meta.file_type().is_symlink() {
+        for entry in fs::read_dir(path)? {
+            total += dir_size(&entry?.path())?;
         }
     }
     Ok(total)
@@ -637,7 +642,7 @@ fn run_tool(
 ) -> Result<u8, String> {
     let install_like = is_install_like(tool, &args);
     if (options.auto_clean || options.ephemeral) && install_like {
-        eprintln!("rim: warning: --auto-clean after install will remove installed dependencies.");
+        eprintln!("rim: warning: cleanup after install will remove installed dependencies.");
         eprintln!("rim: manifest and lockfile changes will remain.");
     }
     if install_like {
@@ -802,7 +807,6 @@ fn print_env(ctx: &RimContext) {
     println!("BUN_INSTALL_CACHE_DIR={}", ctx.bun_cache.display());
 }
 
-static SIGNAL_SEEN: AtomicBool = AtomicBool::new(false);
 const SIGINT: i32 = 2;
 const SIGTERM: i32 = 15;
 const SIG_DFL: usize = 0;
@@ -813,9 +817,7 @@ unsafe extern "C" {
     fn signal(signum: i32, handler: SignalHandler) -> SignalHandler;
 }
 
-extern "C" fn record_signal(_signal: i32) {
-    SIGNAL_SEEN.store(true, Ordering::SeqCst);
-}
+extern "C" fn record_signal(_signal: i32) {}
 
 struct SignalGuard {
     previous_int: SignalHandler,
@@ -824,7 +826,6 @@ struct SignalGuard {
 
 impl SignalGuard {
     fn install() -> Self {
-        SIGNAL_SEEN.store(false, Ordering::SeqCst);
         let previous_int = unsafe { signal(SIGINT, record_signal as *const () as SignalHandler) };
         let previous_term = unsafe { signal(SIGTERM, record_signal as *const () as SignalHandler) };
         Self {

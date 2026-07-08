@@ -22,27 +22,27 @@
         "zod": "3.25.76"
       },
       "normal": {
-        "seconds": 1.376,
+        "seconds": 1.217,
         "project_lstat_bytes": 3724573,
         "project_allocated_bytes": 5410816,
         "node_modules_lstat_bytes": 3719324,
-        "npm_cache_lstat_bytes": 4275788,
-        "total_persistent_lstat_bytes": 8000361
+        "npm_cache_lstat_bytes": 4275763,
+        "total_persistent_lstat_bytes": 8000336
       },
       "rim": {
-        "seconds": 1.379,
+        "seconds": 1.415,
         "project_lstat_bytes": 5325,
         "project_allocated_bytes": 16384,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/tiny-validation/rim-project-cf14421a/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/tiny-validation/rim-project-cf14421a",
-        "ram_lstat_bytes": 9265821,
+        "ram_lstat_bytes": 9265781,
         "total_persistent_lstat_bytes": 5325
       },
-      "saved_persistent_lstat_bytes": 7995036,
+      "saved_persistent_lstat_bytes": 7995011,
       "saved_persistent_percent": 99.93,
       "ram_vs_normal_persistent_percent": 115.82,
-      "rim_ram_overhead_lstat_bytes": 1265460
+      "rim_ram_overhead_lstat_bytes": 1265445
     },
     {
       "name": "utility-client",
@@ -53,27 +53,27 @@
         "lodash": "4.17.21"
       },
       "normal": {
-        "seconds": 2.186,
+        "seconds": 2.322,
         "project_lstat_bytes": 5589704,
         "project_allocated_bytes": 11755520,
         "node_modules_lstat_bytes": 5574564,
-        "npm_cache_lstat_bytes": 4669636,
-        "total_persistent_lstat_bytes": 10259340
+        "npm_cache_lstat_bytes": 4669562,
+        "total_persistent_lstat_bytes": 10259266
       },
       "rim": {
-        "seconds": 2.422,
+        "seconds": 2.445,
         "project_lstat_bytes": 15215,
         "project_allocated_bytes": 24576,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/utility-client/rim-project-98262bf8/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/utility-client/rim-project-98262bf8",
-        "ram_lstat_bytes": 10449969,
+        "ram_lstat_bytes": 10449978,
         "total_persistent_lstat_bytes": 15215
       },
-      "saved_persistent_lstat_bytes": 10244125,
+      "saved_persistent_lstat_bytes": 10244051,
       "saved_persistent_percent": 99.85,
       "ram_vs_normal_persistent_percent": 101.86,
-      "rim_ram_overhead_lstat_bytes": 190629
+      "rim_ram_overhead_lstat_bytes": 190712
     },
     {
       "name": "hono-api",
@@ -84,27 +84,27 @@
         "zod": "4.3.6"
       },
       "normal": {
-        "seconds": 1.774,
+        "seconds": 1.766,
         "project_lstat_bytes": 6932134,
         "project_allocated_bytes": 10559488,
         "node_modules_lstat_bytes": 6926441,
-        "npm_cache_lstat_bytes": 10820336,
-        "total_persistent_lstat_bytes": 17752470
+        "npm_cache_lstat_bytes": 10820361,
+        "total_persistent_lstat_bytes": 17752495
       },
       "rim": {
-        "seconds": 1.955,
+        "seconds": 1.913,
         "project_lstat_bytes": 5762,
         "project_allocated_bytes": 16384,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/hono-api/rim-project-9b38440b/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/hono-api/rim-project-9b38440b",
-        "ram_lstat_bytes": 18116171,
+        "ram_lstat_bytes": 18116091,
         "total_persistent_lstat_bytes": 5762
       },
-      "saved_persistent_lstat_bytes": 17746708,
+      "saved_persistent_lstat_bytes": 17746733,
       "saved_persistent_percent": 99.97,
       "ram_vs_normal_persistent_percent": 102.05,
-      "rim_ram_overhead_lstat_bytes": 363701
+      "rim_ram_overhead_lstat_bytes": 363596
     },
     {
       "name": "react-vite-ts",
@@ -117,27 +117,27 @@
         "vite": "8.1.3"
       },
       "normal": {
-        "seconds": 8.408,
+        "seconds": 8.553,
         "project_lstat_bytes": 65719882,
         "project_allocated_bytes": 67018752,
         "node_modules_lstat_bytes": 65686372,
-        "npm_cache_lstat_bytes": 142514242,
-        "total_persistent_lstat_bytes": 208234124
+        "npm_cache_lstat_bytes": 142514164,
+        "total_persistent_lstat_bytes": 208234046
       },
       "rim": {
-        "seconds": 8.448,
+        "seconds": 9.013,
         "project_lstat_bytes": 33584,
         "project_allocated_bytes": 45056,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/react-vite-ts/rim-project-0f2dc2aa/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/react-vite-ts/rim-project-0f2dc2aa",
-        "ram_lstat_bytes": 208020885,
+        "ram_lstat_bytes": 208021013,
         "total_persistent_lstat_bytes": 33584
       },
-      "saved_persistent_lstat_bytes": 208200540,
+      "saved_persistent_lstat_bytes": 208200462,
       "saved_persistent_percent": 99.98,
       "ram_vs_normal_persistent_percent": 99.9,
-      "rim_ram_overhead_lstat_bytes": -213239
+      "rim_ram_overhead_lstat_bytes": -213033
     },
     {
       "name": "next-app",
@@ -149,27 +149,27 @@
         "typescript": "6.0.3"
       },
       "normal": {
-        "seconds": 14.154,
+        "seconds": 14.766,
         "project_lstat_bytes": 342355686,
         "project_allocated_bytes": 370458624,
         "node_modules_lstat_bytes": 342320907,
-        "npm_cache_lstat_bytes": 233998607,
-        "total_persistent_lstat_bytes": 576354293
+        "npm_cache_lstat_bytes": 233998588,
+        "total_persistent_lstat_bytes": 576354274
       },
       "rim": {
-        "seconds": 14.299,
+        "seconds": 14.621,
         "project_lstat_bytes": 34848,
         "project_allocated_bytes": 45056,
         "node_modules_is_symlink": true,
         "node_modules_link_target": "/dev/shm/rim-bench/next-app/rim-project-8dd01bb2/project/node_modules",
         "rim_dir": "/dev/shm/rim-bench/next-app/rim-project-8dd01bb2",
-        "ram_lstat_bytes": 573166084,
+        "ram_lstat_bytes": 573166015,
         "total_persistent_lstat_bytes": 34848
       },
-      "saved_persistent_lstat_bytes": 576319445,
+      "saved_persistent_lstat_bytes": 576319426,
       "saved_persistent_percent": 99.99,
       "ram_vs_normal_persistent_percent": 99.45,
-      "rim_ram_overhead_lstat_bytes": -3188209
+      "rim_ram_overhead_lstat_bytes": -3188259
     }
   ]
 }
