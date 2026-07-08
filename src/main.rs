@@ -529,6 +529,8 @@ fn active_state(rim_dir: &Path) -> ActiveState {
 }
 
 fn pid_is_alive(pid: u32) -> bool {
+    // Linux-first, best-effort active protection. A future version can compare
+    // process start time from /proc/<pid>/stat to reduce PID reuse ambiguity.
     Path::new("/proc").join(pid.to_string()).exists()
 }
 
@@ -1393,15 +1395,82 @@ fn adopt_command(
         ));
     }
     move_dir_cross_device(&node_modules, &ctx.node_modules)?;
-    symlink(&ctx.node_modules, &node_modules)
+    let result = finish_adopt_after_move(&ctx, &node_modules, &candidate.manager);
+    match result {
+        Ok(()) => {
+            println!(
+                "adopted: {} -> {}",
+                node_modules.display(),
+                ctx.node_modules.display()
+            );
+            Ok(0)
+        }
+        Err(err) => match rollback_adopt_move(&ctx, &node_modules) {
+            Ok(()) => Err(format!(
+                "{err}
+rim: adopt failed after moving node_modules; rollback restored {}",
+                node_modules.display()
+            )),
+            Err(rollback_err) => Err(format!(
+                "{err}
+rim: adopt failed after moving node_modules.
+rim: rollback failed: {rollback_err}
+rim: your node_modules is still at:
+  {}
+
+To recover manually:
+  ln -s {} {}
+or:
+  mv {} {}",
+                ctx.node_modules.display(),
+                ctx.node_modules.display(),
+                node_modules.display(),
+                ctx.node_modules.display(),
+                node_modules.display()
+            )),
+        },
+    }
+}
+
+fn finish_adopt_after_move(
+    ctx: &RimContext,
+    project_node_modules: &Path,
+    manager: &str,
+) -> Result<(), String> {
+    if env::var_os("RIM_TEST_FAIL_ADOPT_SYMLINK").is_some() {
+        return Err("cannot create node_modules symlink: simulated failure".to_owned());
+    }
+    symlink(&ctx.node_modules, project_node_modules)
         .map_err(|e| format!("cannot create node_modules symlink: {e}"))?;
-    write_adopt_meta(&ctx, &candidate.manager)?;
-    println!(
-        "adopted: {} -> {}",
-        node_modules.display(),
-        ctx.node_modules.display()
-    );
-    Ok(0)
+    if env::var_os("RIM_TEST_FAIL_ADOPT_META").is_some() {
+        return Err("cannot write rim metadata: simulated failure".to_owned());
+    }
+    write_adopt_meta(ctx, manager)
+}
+
+fn rollback_adopt_move(ctx: &RimContext, project_node_modules: &Path) -> Result<(), String> {
+    if env::var_os("RIM_TEST_BLOCK_ADOPT_ROLLBACK").is_some() {
+        fs::create_dir_all(project_node_modules)
+            .map_err(|e| format!("cannot create rollback blocker: {e}"))?;
+    }
+    if fs::symlink_metadata(project_node_modules)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fs::remove_file(project_node_modules).map_err(|e| {
+            format!(
+                "cannot remove failed symlink {}: {e}",
+                project_node_modules.display()
+            )
+        })?;
+    }
+    if project_node_modules.exists() {
+        return Err(format!(
+            "{} already exists, cannot restore automatically",
+            project_node_modules.display()
+        ));
+    }
+    move_dir_cross_device(&ctx.node_modules, project_node_modules)
 }
 
 fn print_adopt_plan(ctx: &RimContext, candidate: &ScanCandidate, dry_run: bool, diff_backup: bool) {
@@ -1467,28 +1536,30 @@ fn create_diff_backup(
         return Err("diff-backup requires npm, bun, pnpm, or yarn manager detection".to_owned());
     }
     let scratch = ctx.rim_dir.join(format!("adopt-scratch-{}", now_unix()));
+    let result = create_diff_backup_inner(ctx, candidate, &scratch);
+    cleanup_scratch(&scratch);
+    result
+}
+
+fn create_diff_backup_inner(
+    ctx: &RimContext,
+    candidate: &ScanCandidate,
+    scratch: &Path,
+) -> Result<Option<PathBuf>, String> {
     if scratch.exists() {
-        fs::remove_dir_all(&scratch).map_err(|e| format!("cannot clear scratch: {e}"))?;
+        fs::remove_dir_all(scratch).map_err(|e| format!("cannot clear scratch: {e}"))?;
     }
-    fs::create_dir_all(&scratch).map_err(|e| format!("cannot create scratch: {e}"))?;
-    for name in manifest_names() {
-        let src = ctx.project_root.join(name);
-        if src.exists() {
-            fs::copy(&src, scratch.join(name))
-                .map_err(|e| format!("cannot copy manifest {} to scratch: {e}", src.display()))?;
-        }
-    }
-    run_pristine_install(&candidate.manager, &scratch, ctx)?;
+    fs::create_dir_all(scratch).map_err(|e| format!("cannot create scratch: {e}"))?;
+    copy_manifests_to_dir(&ctx.project_root, scratch)?;
+    run_pristine_install(&candidate.manager, scratch, ctx)?;
     let pristine = scratch.join("node_modules");
     if !pristine.exists() {
-        let _ = fs::remove_dir_all(&scratch);
         return Err("fresh install did not create scratch node_modules".to_owned());
     }
     let backup = backup_root(ctx).join(format!("node_modules-delta-{}", now_unix()));
     fs::create_dir_all(&backup).map_err(|e| format!("cannot create backup dir: {e}"))?;
     let diff = diff_trees(&candidate.node_modules, &pristine, &backup)?;
     write_backup_metadata(ctx, &backup, &candidate.manager, &diff)?;
-    let _ = fs::remove_dir_all(&scratch);
     println!("diff_backup: {}", backup.display());
     Ok(Some(backup))
 }
@@ -1508,26 +1579,50 @@ fn compare_with_fresh_install(
     let scratch = ctx
         .rim_dir
         .join(format!("scan-diff-scratch-{}", now_unix()));
-    fs::create_dir_all(&scratch).map_err(|e| format!("cannot create scratch: {e}"))?;
-    for name in manifest_names() {
-        let src = candidate.project_root.join(name);
-        if src.exists() {
-            fs::copy(&src, scratch.join(name))
-                .map_err(|e| format!("cannot copy manifest {} to scratch: {e}", src.display()))?;
-        }
+    let result = compare_with_fresh_install_inner(ctx, candidate, &scratch);
+    if cleanup {
+        cleanup_scratch(&scratch);
     }
-    run_pristine_install(&candidate.manager, &scratch, ctx)?;
+    result
+}
+
+fn compare_with_fresh_install_inner(
+    ctx: &RimContext,
+    candidate: &ScanCandidate,
+    scratch: &Path,
+) -> Result<DiffCounts, String> {
+    fs::create_dir_all(scratch).map_err(|e| format!("cannot create scratch: {e}"))?;
+    copy_manifests_to_dir(&candidate.project_root, scratch)?;
+    run_pristine_install(&candidate.manager, scratch, ctx)?;
     let backup = scratch.join("diff-output");
     fs::create_dir_all(&backup).map_err(|e| format!("cannot create diff output: {e}"))?;
-    let diff = diff_trees(
+    diff_trees(
         &candidate.node_modules,
         &scratch.join("node_modules"),
         &backup,
-    )?;
-    if cleanup {
-        let _ = fs::remove_dir_all(&scratch);
+    )
+}
+
+fn copy_manifests_to_dir(project_root: &Path, dst_dir: &Path) -> Result<(), String> {
+    for name in manifest_names() {
+        let src = project_root.join(name);
+        if src.exists() {
+            fs::copy(&src, dst_dir.join(name))
+                .map_err(|e| format!("cannot copy manifest {} to scratch: {e}", src.display()))?;
+        }
     }
-    Ok(diff)
+    Ok(())
+}
+
+fn cleanup_scratch(scratch: &Path) {
+    if scratch.exists()
+        && let Err(err) = fs::remove_dir_all(scratch)
+    {
+        eprintln!(
+            "rim: warning: failed to remove scratch {}: {err}",
+            scratch.display()
+        );
+    }
 }
 
 fn run_pristine_install(manager: &str, cwd: &Path, ctx: &RimContext) -> Result<(), String> {
@@ -1561,6 +1656,9 @@ fn run_pristine_install(manager: &str, cwd: &Path, ctx: &RimContext) -> Result<(
 }
 
 fn diff_trees(existing: &Path, pristine: &Path, backup: &Path) -> Result<DiffCounts, String> {
+    if env::var_os("RIM_TEST_FAIL_DIFF").is_some() {
+        return Err("simulated diff failure".to_owned());
+    }
     let existing_map = snapshot_tree(existing)?;
     let pristine_map = snapshot_tree(pristine)?;
     let mut diff = DiffCounts::default();
@@ -1836,14 +1934,46 @@ fn resolve_backup(ctx: &RimContext, id: &str) -> Result<PathBuf, String> {
 }
 
 fn print_backup(backup: &Path) -> Result<(), String> {
-    println!("backup: {}", backup.display());
-    let summary = backup.join("summary.txt");
-    if summary.exists() {
-        print!(
-            "{}",
-            fs::read_to_string(summary).map_err(|e| format!("cannot read summary: {e}"))?
-        );
+    let id = backup
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    println!("backup: {id}");
+    println!("path: {}", backup.display());
+    let metadata = backup.join("metadata.json");
+    if metadata.exists() {
+        let contents =
+            fs::read_to_string(&metadata).map_err(|e| format!("cannot read metadata: {e}"))?;
+        if let Some(project_root) = json_string_field(&contents, "project_root") {
+            println!("project: {project_root}");
+        }
+        if let Some(manager) = json_string_field(&contents, "manager") {
+            println!("manager: {manager}");
+        }
+        if let Some(created_at) = json_u64_field(&contents, "created_at") {
+            println!("created_at: {created_at}");
+        }
+        if let Some(manifest_hash) = json_string_field(&contents, "manifest_hash") {
+            println!("manifest_hash: {manifest_hash}");
+        }
+        println!("differences:");
+        for key in ["changed", "added", "deleted", "type_changed", "binary"] {
+            let value = json_u64_field(&contents, key).unwrap_or(0);
+            println!("  {key}: {value}");
+        }
+    } else {
+        let summary = backup.join("summary.txt");
+        if summary.exists() {
+            print!(
+                "{}",
+                fs::read_to_string(summary).map_err(|e| format!("cannot read summary: {e}"))?
+            );
+        }
     }
+    println!();
+    println!("restore:");
+    println!("  rim ensure");
+    println!("  rim backup restore {id}");
     Ok(())
 }
 

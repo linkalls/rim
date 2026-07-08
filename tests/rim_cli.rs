@@ -2280,3 +2280,274 @@ fn doctor_suggest_reports_stale_locks() {
         "stdout: {stdout}"
     );
 }
+
+fn path_contains_name(root: &Path, needle: &str) -> bool {
+    if !root.exists() {
+        return false;
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if child
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(needle))
+            {
+                return true;
+            }
+            if child.is_dir() {
+                stack.push(child);
+            }
+        }
+    }
+    false
+}
+
+#[test]
+fn adopt_rolls_back_when_symlink_creation_fails_after_move() {
+    let project = unique_temp("adopt-rollback-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "original\n").expect("dep");
+
+    let out = Command::new(bin())
+        .args(["adopt", project.to_str().unwrap()])
+        .env("RIM_BASE", &base)
+        .env("RIM_TEST_FAIL_ADOPT_SYMLINK", "1")
+        .current_dir(&project)
+        .output()
+        .expect("adopt rollback");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("rollback restored"), "stderr: {stderr}");
+    assert!(
+        project.join("node_modules").is_dir(),
+        "node_modules should be restored as a real dir"
+    );
+    assert!(
+        !project.join("node_modules").is_symlink(),
+        "rollback should not leave a symlink"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("node_modules/pkg/index.js")).expect("restored dep"),
+        "original\n"
+    );
+}
+
+#[test]
+fn adopt_reports_recovery_path_when_rollback_fails() {
+    let project = unique_temp("adopt-rollback-fail-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "original\n").expect("dep");
+
+    let out = Command::new(bin())
+        .args(["adopt", project.to_str().unwrap()])
+        .env("RIM_BASE", &base)
+        .env("RIM_TEST_FAIL_ADOPT_SYMLINK", "1")
+        .env("RIM_TEST_BLOCK_ADOPT_ROLLBACK", "1")
+        .current_dir(&project)
+        .output()
+        .expect("adopt rollback failure");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("your node_modules is still at"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("To recover manually"), "stderr: {stderr}");
+    assert!(stderr.contains("ln -s"), "stderr: {stderr}");
+    assert!(stderr.contains("mv "), "stderr: {stderr}");
+    let layers = fs::read_dir(&base)
+        .expect("base")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(layers.len(), 1, "expected one layer in base");
+    assert!(
+        layers[0]
+            .path()
+            .join("project/node_modules/pkg/index.js")
+            .exists()
+    );
+}
+
+#[test]
+fn adopt_diff_backup_pristine_failure_cleans_scratch() {
+    let project = unique_temp("adopt-pristine-fail-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "patched\n").expect("dep");
+    let fake_bin = unique_temp("bin");
+    let fake_bun = fake_bin.join("bun");
+    fs::write(&fake_bun, "#!/usr/bin/env bash\nexit 37\n").expect("fake bun");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_bun)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .args(["adopt", project.to_str().unwrap(), "--diff-backup"])
+        .env("RIM_BASE", &base)
+        .env("PATH", path)
+        .current_dir(&project)
+        .output()
+        .expect("adopt diff-backup failure");
+    assert!(!out.status.success());
+    assert!(
+        !path_contains_name(&base, "adopt-scratch"),
+        "scratch dir should be cleaned after failure"
+    );
+    assert!(
+        project.join("node_modules/pkg/index.js").exists(),
+        "adopt should not move after diff-backup failure"
+    );
+}
+
+#[test]
+fn scan_diff_pristine_failure_cleans_scratch() {
+    let project = unique_temp("scan-pristine-fail-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "patched\n").expect("dep");
+    let fake_bin = unique_temp("bin");
+    let fake_bun = fake_bin.join("bun");
+    fs::write(&fake_bun, "#!/usr/bin/env bash\nexit 38\n").expect("fake bun");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_bun)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .args(["scan", project.to_str().unwrap(), "--diff"])
+        .env("RIM_BASE", &base)
+        .env("PATH", path)
+        .current_dir(&project)
+        .output()
+        .expect("scan diff failure");
+    assert!(!out.status.success());
+    assert!(
+        !path_contains_name(&base, "scan-diff-scratch"),
+        "scan scratch dir should be cleaned after failure"
+    );
+}
+
+#[test]
+fn adopt_diff_backup_diff_failure_cleans_scratch() {
+    let project = unique_temp("adopt-diff-fail-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "patched\n").expect("dep");
+    let fake_bin = unique_temp("bin");
+    let fake_bun = fake_bin.join("bun");
+    fs::write(
+        &fake_bun,
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p node_modules/pkg\nprintf baseline\\n > node_modules/pkg/index.js\nprintf lock > bun.lock\n",
+    )
+    .expect("fake bun");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_bun)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .args(["adopt", project.to_str().unwrap(), "--diff-backup"])
+        .env("RIM_BASE", &base)
+        .env("PATH", path)
+        .env("RIM_TEST_FAIL_DIFF", "1")
+        .current_dir(&project)
+        .output()
+        .expect("adopt diff fail");
+    assert!(!out.status.success());
+    assert!(
+        !path_contains_name(&base, "adopt-scratch"),
+        "scratch dir should be cleaned after diff failure"
+    );
+}
+
+#[test]
+fn backup_show_latest_prints_metadata_and_restore_hint() {
+    let project = unique_temp("backup-show-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    let backup = project.join(".rim-backups/node_modules-delta-1");
+    fs::create_dir_all(&backup).expect("backup");
+    fs::write(
+        backup.join("metadata.json"),
+        format!(
+            "{{\n  \"schema_version\": 1,\n  \"project_root\": \"{}\",\n  \"manager\": \"bun\",\n  \"created_at\": 123,\n  \"manifest_hash\": \"abc\",\n  \"differences\": {{\"changed\": 2, \"added\": 1, \"deleted\": 0, \"type_changed\": 3, \"binary\": 4}}\n}}\n",
+            project.display()
+        ),
+    )
+    .expect("metadata");
+    fs::write(backup.join("summary.txt"), "changed: 2\n").expect("summary");
+
+    let out = Command::new(bin())
+        .args(["backup", "show", "latest"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("backup show");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("backup: node_modules-delta-1"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("project: {}", project.display())),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("manager: bun"), "stdout: {stdout}");
+    assert!(stdout.contains("created_at: 123"), "stdout: {stdout}");
+    assert!(stdout.contains("manifest_hash: abc"), "stdout: {stdout}");
+    assert!(stdout.contains("changed: 2"), "stdout: {stdout}");
+    assert!(stdout.contains("added: 1"), "stdout: {stdout}");
+    assert!(stdout.contains("type_changed: 3"), "stdout: {stdout}");
+    assert!(stdout.contains("binary: 4"), "stdout: {stdout}");
+    assert!(stdout.contains("rim ensure"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("rim backup restore node_modules-delta-1"),
+        "stdout: {stdout}"
+    );
+}

@@ -282,7 +282,7 @@ node_modules -> /dev/shm/rim/app-<hash>/project/node_modules
 
 Each layer also gets `.rim-meta.json` so `rim ls` and `rim gc` can reverse-map a dependency layer back to its source project, manager, mode, created time, last-used time, manifest hash, and pinned state. Metadata writes are atomic: `rim` writes a temporary file and renames it into place.
 
-While a wrapped command is running, `rim` writes `.rim-active` in the layer with the current pid and command. `rim clean` refuses active layers by default, and `rim gc` skips them. Use `--force` only when you are sure the process is gone or the lock is stale.
+While a wrapped command is running, `rim` writes `.rim-active` in the layer with the current pid and command. This is best-effort active protection: on Linux, `rim` treats `/proc/<pid>` as the source of truth. `rim clean` refuses active layers by default, and `rim gc` skips them. Use `--force` only when you are sure the process is gone or the lock is stale.
 
 If a process dies and leaves a stale lock, `rim doctor --suggest` reports it and `rim repair --stale-locks` removes only locks whose pid is no longer alive.
 
@@ -363,7 +363,7 @@ PROJECT                         SIZE      MANAGER  RISK    ACTION     WARNINGS
 ~/code/pnpm-mono                2.8 GB    pnpm     high    skip       pnpm store layout is high-risk for adopt
 ```
 
-`rim adopt <project>` moves an existing real `node_modules` directory into the current `RIM_BASE` layer and replaces the project copy with a symlink:
+`rim adopt <project>` moves an existing real `node_modules` directory into the current `RIM_BASE` layer and replaces the project copy with a symlink. If adoption fails after the move, `rim` tries to roll back by moving `node_modules` back to the project. If rollback also fails, it prints the exact recovery path and manual `ln -s` / `mv` commands:
 
 ```bash
 rim adopt ~/code/tiny-hono --dry-run
@@ -402,7 +402,7 @@ rim adopt ~/code/app --diff-backup
 
 The comparison is not a proof of manual edits. Lifecycle scripts, native packages, generated files, and lockfile-free projects can create differences that are not hand patches. It is still much safer than blindly moving a hand-modified `node_modules` into tmpfs.
 
-`rim adopt --diff-backup --dry-run` stays strict: it does not create scratch directories or backups. Use `rim scan --diff <project>` when you want to run the fresh-install comparison without adopting.
+`rim adopt --diff-backup --dry-run` stays strict: it does not create scratch directories or backups. Use `rim scan --diff <project>` when you want to run the fresh-install comparison without adopting. Both `adopt --diff-backup` and `scan --diff` clean their scratch directories on success and failure.
 
 Restore delta files later with:
 
@@ -413,11 +413,45 @@ rim backup restore latest --dry-run
 rim backup restore latest
 ```
 
+`rim backup show` prints metadata and a restore hint:
+
+```txt
+backup: node_modules-delta-20260708-143000
+path: /home/poteto/code/app/.rim-backups/node_modules-delta-20260708-143000
+project: /home/poteto/code/app
+manager: bun
+created_at: 1783...
+manifest_hash: ...
+differences:
+  changed: 2
+  added: 1
+  deleted: 0
+  type_changed: 0
+  binary: 1
+
+restore:
+  rim ensure
+  rim backup restore node_modules-delta-20260708-143000
+```
+
 Restore applies `changed/`, `added/`, and `binary/` files. `deleted.json` is shown but not applied unless `--apply-deletes` is passed.
+
+If an adopted tmpfs layer disappeared after reboot, regenerate the pristine dependencies first, then restore the saved delta:
+
+```bash
+rim ensure
+rim backup restore latest
+```
+
+Use deletes only when you really want to remove files that existed in the fresh baseline:
+
+```bash
+rim backup restore latest --apply-deletes
+```
 
 `.rim-backups/` can contain local patches or generated files from dependencies. It is ignored by this repo's `.gitignore` and should not be committed unless you intentionally want to publish those files.
 
-`rim scan --diff <project>` can run the fresh-install comparison without adopting. For now it requires exactly one unmanaged candidate. With `--json`, stdout is a single JSON object with a `candidates` array plus `manual_diff` and `diff` fields when diffing is enabled.
+`rim scan --diff <project>` can run the fresh-install comparison without adopting. For now it requires exactly one unmanaged candidate. With `--json`, stdout is a single JSON object with a `candidates` array plus `manual_diff` and `diff` fields when diffing is enabled. `rim scan --diff` may temporarily use as much space as a fresh install in `RIM_BASE`; for large projects, prefer `RIM_PROFILE=cache` or `RIM_PROFILE=external`.
 
 ## Layer inventory and garbage collection
 
@@ -633,12 +667,15 @@ Current suite:
 - rim-managed `node_modules` symlinks are reported as managed/skip candidates
 - `rim adopt --dry-run` makes no project changes
 - `rim adopt` moves a real `node_modules` into a rim layer and leaves a symlink
+- `rim adopt` rolls back the move if symlink/metadata creation fails, or prints manual recovery paths
 - high-risk adopt is refused unless `--allow-risk` is passed
 - `rim adopt --diff-backup` saves changed/added/binary deltas under `.rim-backups`
+- `rim adopt --diff-backup` and `rim scan --diff` clean scratch dirs on success and failure
 - `rim adopt --diff-backup --dry-run` creates no scratch dirs, backups, or project changes
 - `rim backup list/show/restore` manages delta backups
 - `.rim-backups/` and `.rim-active` are ignored by git
 - backup restore dry-runs without writing and restores changed/added/binary files by default
+- `rim backup show` prints metadata, diff counts, and a restore hint
 - `rim backup restore --apply-deletes` is required before deleted entries are removed
 - `.rim-meta.json` powers `rim ls` and metadata-based `rim gc`
 - `.rim-meta.json` stores manifest hash and pinned state
@@ -673,6 +710,7 @@ Current suite:
 - Linux-first. `/dev/shm` is the default because the main target is small Linux boxes and disposable dependency state.
 - RAM/tmpfs is finite; large Playwright/Next/Expo/Electron installs can still blow up `/dev/shm`.
 - Do not store hand-edited `node_modules` only in tmpfs. If `RIM_BASE` is `/dev/shm/rim`, adopted dependencies disappear on reboot; use `--diff-backup`, `RIM_PROFILE=cache`, or `RIM_PROFILE=external`.
+- Active-lock protection is best-effort and based on `/proc/<pid>` on Linux; PID reuse is theoretically possible.
 - `--force` overrides active-lock protection. Use it only for confirmed stale locks or emergency cleanup.
 - Keeping the repo public is fine for rim itself, but never publish `.rim-backups/` unless you have reviewed the dependency diffs inside.
 - Restarting clears `/dev/shm`; run `rim npm install` again to recreate dependencies.
