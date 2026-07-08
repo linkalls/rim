@@ -62,6 +62,8 @@ fn run() -> Result<u8, String> {
         return Ok(2);
     };
 
+    platform::ensure_runtime_supported()?;
+
     let ctx = build_context()?;
     let mut command = command;
     let mut options = options;

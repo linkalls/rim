@@ -5,6 +5,19 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 #[cfg(unix)]
+pub fn ensure_runtime_supported() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn ensure_runtime_supported() -> Result<(), String> {
+    Err(
+        "native Windows runtime is intentionally disabled. rim is Linux-first; use WSL for /dev/shm RAM/tmpfs behavior, or run on Linux. Windows builds are kept compile-only for now."
+            .to_owned(),
+    )
+}
+
+#[cfg(unix)]
 pub fn create_dir_link(target: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
@@ -82,9 +95,10 @@ pub fn default_rim_base() -> Result<PathBuf, String> {
         Some("external") => env::var_os("RIM_EXTERNAL_BASE")
             .map(PathBuf::from)
             .ok_or_else(|| "RIM_PROFILE=external requires RIM_EXTERNAL_BASE; rim will not guess a drive like D:\\rim".to_owned()),
-        Some("ram") => env::var_os("RIM_RAM_BASE")
-            .map(PathBuf::from)
-            .ok_or_else(|| "RIM_PROFILE=ram on native Windows requires RIM_RAM_BASE pointing at a RAM disk, for example R:\\rim. RIM_BASE can also be set directly.".to_owned()),
+        Some("ram") => Err(
+            "RIM_PROFILE=ram is not supported on native Windows. Use WSL for /dev/shm tmpfs behavior."
+                .to_owned(),
+        ),
         Some(other) => Err(format!(
             "unknown RIM_PROFILE={other}; expected cache, external, or ram"
         )),
@@ -244,45 +258,25 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn windows_ram_profile_uses_rim_ram_base() {
-        let old_profile = env::var_os("RIM_PROFILE");
-        let old_ram = env::var_os("RIM_RAM_BASE");
-        unsafe {
-            env::set_var("RIM_PROFILE", "ram");
-            env::set_var("RIM_RAM_BASE", r"R:\rim");
-        }
-        assert_eq!(default_rim_base().unwrap(), PathBuf::from(r"R:\rim"));
-        unsafe {
-            match old_profile {
-                Some(value) => env::set_var("RIM_PROFILE", value),
-                None => env::remove_var("RIM_PROFILE"),
-            }
-            match old_ram {
-                Some(value) => env::set_var("RIM_RAM_BASE", value),
-                None => env::remove_var("RIM_RAM_BASE"),
-            }
-        }
+    fn windows_runtime_is_compile_only() {
+        let err = ensure_runtime_supported().unwrap_err();
+        assert!(err.contains("native Windows runtime is intentionally disabled"));
+        assert!(err.contains("use WSL"));
     }
 
     #[test]
     #[cfg(windows)]
-    fn windows_ram_profile_requires_rim_ram_base() {
+    fn windows_ram_profile_is_rejected() {
         let old_profile = env::var_os("RIM_PROFILE");
-        let old_ram = env::var_os("RIM_RAM_BASE");
         unsafe {
             env::set_var("RIM_PROFILE", "ram");
-            env::remove_var("RIM_RAM_BASE");
         }
         let err = default_rim_base().unwrap_err();
-        assert!(err.contains("RIM_PROFILE=ram on native Windows requires RIM_RAM_BASE"));
+        assert!(err.contains("RIM_PROFILE=ram is not supported on native Windows"));
         unsafe {
             match old_profile {
                 Some(value) => env::set_var("RIM_PROFILE", value),
                 None => env::remove_var("RIM_PROFILE"),
-            }
-            match old_ram {
-                Some(value) => env::set_var("RIM_RAM_BASE", value),
-                None => env::remove_var("RIM_RAM_BASE"),
             }
         }
     }

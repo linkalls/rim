@@ -1,6 +1,6 @@
 # rim
 
-**rim** is a tiny Rust CLI for storage-starved Linux machines and experimental native Windows setups: keep project source on disk, but move disposable JavaScript dependency weight into a separate dependency layer.
+**rim** is a tiny Rust CLI for storage-starved Linux/WSL machines: keep project source on disk, but move disposable JavaScript dependency weight into a separate dependency layer.
 
 The core idea:
 
@@ -12,7 +12,7 @@ This is especially useful on small experiments, AI-generated throwaway apps, and
 
 ## Current status
 
-MVP, Linux-first, native Windows experimental.
+MVP, Linux-first and WSL-friendly. Native Windows builds are compile-only and intentionally refuse to run.
 
 Implemented:
 
@@ -51,7 +51,7 @@ Implemented:
 - existing unmanaged `node_modules` can be scanned and safely adopted into a rim layer
 - optional diff backups compare existing `node_modules` against a fresh install
 - `bunfig.toml` is copied into the shadow project for Bun installs
-- native Windows compile support via a small platform abstraction; Windows runtime support is experimental
+- native Windows compile support via a small platform abstraction; native Windows runtime is intentionally disabled
 
 No external Rust dependencies are used.
 
@@ -309,23 +309,23 @@ RIM_BASE=/dev/shm/rim rim npm install
 Profile presets:
 
 ```bash
-RIM_PROFILE=ram rim install       # Linux/WSL: /dev/shm/rim; Windows: requires RIM_RAM_BASE
-RIM_PROFILE=cache rim install     # Linux: $HOME/.cache/rim; Windows: %LOCALAPPDATA%\rim
-RIM_PROFILE=external rim install  # requires $RIM_EXTERNAL_BASE / %RIM_EXTERNAL_BASE%
+RIM_PROFILE=ram rim install       # Linux/WSL: /dev/shm/rim
+RIM_PROFILE=cache rim install     # Linux/WSL: $HOME/.cache/rim
+RIM_PROFILE=external rim install  # requires $RIM_EXTERNAL_BASE
 ```
 
 Default when unset:
 
 ```txt
 Linux/WSL:       /dev/shm/rim
-Native Windows:  %LOCALAPPDATA%\rim
+Native Windows:  unsupported at runtime; use WSL
 ```
 
 You can choose different operating modes:
 
 | Mode | Example | Tradeoff |
 |---|---|---|
-| RAM/tmpfs | Linux/WSL: `RIM_BASE=/dev/shm/rim`; Windows: `RIM_RAM_BASE=R:\rim RIM_PROFILE=ram` | Fast and fully disposable; uses RAM/shared memory or an explicit RAM disk |
+| RAM/tmpfs | `RIM_BASE=/dev/shm/rim` | Fast and fully disposable; uses Linux/WSL RAM/shared memory |
 | Cache isolation | `RIM_BASE=$HOME/.cache/rim` | Saves project directories from `node_modules`; uses normal disk cache |
 | External storage | `RIM_BASE=/mnt/external/rim` | Good for tiny internal disks; dependency mass goes to USB/SSD |
 
@@ -349,34 +349,22 @@ After successful npm/bun install-like commands, `rim` trims the package-manager 
 
 ## Windows
 
-Native Windows support is experimental. Linux and WSL remain the primary targets.
+Native Windows builds are compile-only for now and intentionally refuse to run.
 
-Default dependency layer on native Windows:
+`rim` is Linux-first. For Windows machines, use WSL to get the intended `/dev/shm` RAM/tmpfs behavior:
 
-```txt
-%LOCALAPPDATA%\rim
+```bash
+RIM_PROFILE=ram rim install
 ```
 
-Recommended native Windows modes:
+Why native Windows is disabled:
 
-```powershell
-$env:RIM_PROFILE = "cache"; rim install
-$env:RIM_PROFILE = "external"; $env:RIM_EXTERNAL_BASE = "E:\rim"; rim install
-$env:RIM_PROFILE = "ram"; $env:RIM_RAM_BASE = "R:\rim"; rim install
-```
+- directory symlinks depend on Developer Mode, `SeCreateSymbolicLinkPrivilege`, or Administrator privileges
+- RAM-disk behavior is not built into Windows and would require user-created drive setup
+- active lock checks are only best-effort outside Linux/WSL
+- WSL already gives the clean Linux semantics rim is designed around
 
-`RIM_PROFILE=ram` is available on native Windows when `RIM_RAM_BASE` points at an existing RAM disk. `rim` will not create the RAM disk for you or guess a drive letter. You can also bypass profiles and set `RIM_BASE` directly, for example `set RIM_BASE=R:\rim` in `cmd` or `$env:RIM_BASE = "R:\rim"` in PowerShell. For `/dev/shm` tmpfs behavior without a Windows RAM disk, use WSL.
-
-Native Windows `node_modules` links use directory symlinks. Creating them may require Developer Mode, `SeCreateSymbolicLinkPrivilege`, or running the terminal as Administrator. If symlink creation fails, try one of:
-
-- enable Developer Mode
-- run your terminal as Administrator
-- use WSL
-- set `RIM_BASE` to a persistent cache/external path and retry
-
-Junction fallback is intentionally left for a future version; the current MVP uses stable Rust directory symlinks only.
-
-Active lock protection is best-effort on every platform. On Linux/WSL it checks `/proc/<pid>`; on native Windows it uses `tasklist` when available and stays conservative if the check fails.
+The Windows platform abstraction stays in the codebase so the project can continue to compile for `x86_64-pc-windows-msvc`, but runtime support is not recommended until there is a stronger reason to maintain it.
 
 ## Scanning and adopting existing node_modules
 
@@ -747,10 +735,10 @@ Current suite:
 
 ## Caveats
 
-- Linux-first, with experimental native Windows support. `/dev/shm` is the Linux/WSL default because the main target is small Linux boxes and disposable dependency state.
+- Linux-first and WSL-friendly. Native Windows builds are compile-only and intentionally refuse to run. `/dev/shm` is the Linux/WSL default because the main target is small Linux boxes and disposable dependency state.
 - RAM/tmpfs is finite; large Playwright/Next/Expo/Electron installs can still blow up `/dev/shm`.
 - Do not store hand-edited `node_modules` only in tmpfs. If `RIM_BASE` is `/dev/shm/rim`, adopted dependencies disappear on reboot; use `--diff-backup`, `--copy`, `RIM_PROFILE=cache`, or `RIM_PROFILE=external`.
-- Active-lock protection is best-effort and based on `/proc/<pid>` on Linux; PID reuse is theoretically possible.
+- Active-lock protection is best-effort and based on `/proc/<pid>` on Linux/WSL; PID reuse is theoretically possible.
 - `--force` overrides active-lock protection. Use it only for confirmed stale locks or emergency cleanup.
 - Keeping the repo public is fine for rim itself, but never publish `.rim-backups/` unless you have reviewed the dependency diffs inside.
 - Restarting clears `/dev/shm`; run `rim npm install` again to recreate dependencies.
