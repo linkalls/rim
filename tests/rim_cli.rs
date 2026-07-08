@@ -2563,3 +2563,123 @@ fn backup_show_latest_prints_metadata_and_restore_hint() {
         "stdout: {stdout}"
     );
 }
+
+#[test]
+fn adopt_copy_dry_run_does_not_create_layer_or_backup() {
+    let project = unique_temp("adopt-copy-dry-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "original\n").expect("dep");
+
+    let out = Command::new(bin())
+        .args(["adopt", project.to_str().unwrap(), "--copy", "--dry-run"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("adopt copy dry-run");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("copy: would copy"), "stdout: {stdout}");
+    assert!(project.join("node_modules").is_dir());
+    assert!(!project.join("node_modules").is_symlink());
+    assert!(!project.join(".rim-backups").exists());
+    assert!(fs::read_dir(&base).expect("base").next().is_none());
+}
+
+#[test]
+fn adopt_copy_keeps_original_backup_and_links_project() {
+    let project = unique_temp("adopt-copy-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "original\n").expect("dep");
+
+    let out = Command::new(bin())
+        .args(["adopt", project.to_str().unwrap(), "--copy"])
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("adopt copy");
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(project.join("node_modules").is_symlink());
+    let target = fs::read_link(project.join("node_modules")).expect("link");
+    assert!(target.starts_with(&base));
+    assert_eq!(
+        fs::read_to_string(target.join("pkg/index.js")).unwrap(),
+        "original\n"
+    );
+
+    let backup_root = project.join(".rim-backups");
+    let backups = fs::read_dir(&backup_root)
+        .expect("backup root")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(backups.len(), 1);
+    let original_backup = backups[0].path();
+    assert!(
+        original_backup
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("node_modules-original-")),
+        "backup path: {}",
+        original_backup.display()
+    );
+    assert_eq!(
+        fs::read_to_string(original_backup.join("pkg/index.js")).unwrap(),
+        "original\n"
+    );
+
+    let rim_dir = target.parent().and_then(Path::parent).expect("rim dir");
+    let meta = fs::read_to_string(rim_dir.join(".rim-meta.json")).expect("meta");
+    assert!(
+        meta.contains("\"adopt_method\": \"copy-existing-node_modules\""),
+        "meta: {meta}"
+    );
+}
+
+#[test]
+fn adopt_copy_rolls_back_when_symlink_creation_fails() {
+    let project = unique_temp("adopt-copy-rollback-project");
+    let base = unique_temp("base");
+    fs::write(project.join("package.json"), "{}\n").expect("package");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    fs::create_dir_all(project.join("node_modules/pkg")).expect("node_modules");
+    fs::write(project.join("node_modules/pkg/index.js"), "original\n").expect("dep");
+
+    let out = Command::new(bin())
+        .args(["adopt", project.to_str().unwrap(), "--copy"])
+        .env("RIM_BASE", &base)
+        .env("RIM_TEST_FAIL_ADOPT_SYMLINK", "1")
+        .current_dir(&project)
+        .output()
+        .expect("adopt copy rollback");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("adopt --copy failed; rollback restored"),
+        "stderr: {stderr}"
+    );
+    assert!(project.join("node_modules").is_dir());
+    assert!(!project.join("node_modules").is_symlink());
+    assert_eq!(
+        fs::read_to_string(project.join("node_modules/pkg/index.js")).unwrap(),
+        "original\n"
+    );
+    assert!(
+        !project
+            .join(".rim-backups/node_modules-original-0")
+            .exists()
+    );
+    assert!(
+        !path_contains_name(&base, "node_modules"),
+        "copied layer node_modules should be cleaned on rollback"
+    );
+}

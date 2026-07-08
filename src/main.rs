@@ -183,7 +183,7 @@ Usage:
   rim doctor [--suggest]
   rim clean [--cache-only|--deps-only] [--force]
   rim scan [--json|--diff] <path>...
-  rim adopt <project> [--dry-run] [--allow-risk] [--diff-backup]
+  rim adopt <project> [--dry-run] [--allow-risk] [--diff-backup] [--copy]
   rim backup list|show|restore <id|latest> [--dry-run] [--apply-deletes]
   rim repair --stale-locks [--dry-run]
   rim ensure [bun|npm|pnpm]
@@ -1329,12 +1329,14 @@ fn adopt_command(
     let mut dry_run = global_options.dry_run;
     let mut allow_risk = false;
     let mut diff_backup = false;
+    let mut copy_mode = false;
     let mut project_arg: Option<PathBuf> = None;
     for arg in args {
         match arg.to_str() {
             Some("--dry-run") => dry_run = true,
             Some("--allow-risk") => allow_risk = true,
             Some("--diff-backup") => diff_backup = true,
+            Some("--copy") => copy_mode = true,
             Some(path) if project_arg.is_none() => project_arg = Some(expand_tilde(path)),
             Some(other) => return Err(format!("unknown adopt option or extra path: {other}")),
             None => return Err("adopt arguments must be valid UTF-8".to_owned()),
@@ -1347,7 +1349,7 @@ fn adopt_command(
     let ctx = build_context_for_project(project_root.clone(), base_ctx.rim_base.clone());
     let node_modules = project_root.join("node_modules");
     let candidate = analyze_node_modules(&ctx, &node_modules);
-    print_adopt_plan(&ctx, &candidate, dry_run, diff_backup);
+    print_adopt_plan(&ctx, &candidate, dry_run, diff_backup, copy_mode);
 
     if candidate.managed {
         return Err("node_modules is already managed by rim".to_owned());
@@ -1369,6 +1371,12 @@ fn adopt_command(
             println!("diff_backup: would compare existing node_modules with a fresh install");
             println!("diff_backup: dry-run does not create scratch files or backups");
         }
+        if copy_mode {
+            println!(
+                "copy: would copy node_modules into the rim layer and move the original into .rim-backups"
+            );
+            println!("copy: dry-run does not create backups, layer files, or symlinks");
+        }
         return Ok(0);
     }
 
@@ -1386,30 +1394,111 @@ fn adopt_command(
             ctx.node_modules.display()
         ));
     }
-    move_dir_cross_device(&node_modules, &ctx.node_modules)?;
-    let result = finish_adopt_after_move(&ctx, &node_modules, &candidate.manager);
+    if copy_mode {
+        adopt_copy_mode(&ctx, &node_modules, &candidate.manager)
+    } else {
+        move_dir_cross_device(&node_modules, &ctx.node_modules)?;
+        let result = finish_adopt_after_move(
+            &ctx,
+            &node_modules,
+            &candidate.manager,
+            "move-existing-node_modules",
+        );
+        match result {
+            Ok(()) => {
+                println!(
+                    "adopted: {} -> {}",
+                    node_modules.display(),
+                    ctx.node_modules.display()
+                );
+                Ok(0)
+            }
+            Err(err) => match rollback_adopt_move(&ctx, &node_modules) {
+                Ok(()) => Err(format!(
+                    "{err}
+rim: adopt failed after moving node_modules; rollback restored {}",
+                    node_modules.display()
+                )),
+                Err(rollback_err) => Err(format!(
+                    "{err}\nrim: adopt failed after moving node_modules.\nrim: rollback failed: {rollback_err}\nrim: your node_modules is still at:\n  {}\n\n{}",
+                    ctx.node_modules.display(),
+                    manual_recovery_message(&ctx.node_modules, &node_modules)
+                )),
+            },
+        }
+    }
+}
+
+fn adopt_copy_mode(
+    ctx: &RimContext,
+    project_node_modules: &Path,
+    manager: &str,
+) -> Result<u8, String> {
+    eprintln!("rim: warning: --copy temporarily uses roughly 2x node_modules space.");
+    copy_dir_recursive(project_node_modules, &ctx.node_modules)?;
+    let original_backup = backup_root(ctx).join(format!("node_modules-original-{}", now_unix()));
+    fs::create_dir_all(backup_root(ctx)).map_err(|e| format!("cannot create backup root: {e}"))?;
+    if original_backup.exists() {
+        return Err(format!(
+            "backup path already exists: {}",
+            original_backup.display()
+        ));
+    }
+    move_dir_cross_device(project_node_modules, &original_backup)?;
+    let result = finish_adopt_after_move(
+        ctx,
+        project_node_modules,
+        manager,
+        "copy-existing-node_modules",
+    );
     match result {
         Ok(()) => {
             println!(
-                "adopted: {} -> {}",
-                node_modules.display(),
+                "adopted(copy): {} -> {}",
+                project_node_modules.display(),
                 ctx.node_modules.display()
             );
+            println!("original_backup: {}", original_backup.display());
             Ok(0)
         }
-        Err(err) => match rollback_adopt_move(&ctx, &node_modules) {
+        Err(err) => match rollback_adopt_copy(ctx, project_node_modules, &original_backup) {
             Ok(()) => Err(format!(
-                "{err}
-rim: adopt failed after moving node_modules; rollback restored {}",
-                node_modules.display()
+                "{err}\nrim: adopt --copy failed; rollback restored {}",
+                project_node_modules.display()
             )),
             Err(rollback_err) => Err(format!(
-                "{err}\nrim: adopt failed after moving node_modules.\nrim: rollback failed: {rollback_err}\nrim: your node_modules is still at:\n  {}\n\n{}",
+                "{err}\nrim: adopt --copy failed.\nrim: rollback failed: {rollback_err}\nrim: copied layer node_modules is at:\n  {}\nrim: original backup is at:\n  {}\n\nTo recover manually, move the original backup back or recreate the link.",
                 ctx.node_modules.display(),
-                manual_recovery_message(&ctx.node_modules, &node_modules)
+                original_backup.display()
             )),
         },
     }
+}
+
+fn rollback_adopt_copy(
+    ctx: &RimContext,
+    project_node_modules: &Path,
+    original_backup: &Path,
+) -> Result<(), String> {
+    if platform::is_dir_link(project_node_modules) {
+        platform::remove_dir_link(project_node_modules).map_err(|e| {
+            format!(
+                "cannot remove failed link {}: {e}",
+                project_node_modules.display()
+            )
+        })?;
+    }
+    if project_node_modules.exists() {
+        return Err(format!(
+            "{} already exists, cannot restore original backup automatically",
+            project_node_modules.display()
+        ));
+    }
+    move_dir_cross_device(original_backup, project_node_modules)?;
+    if ctx.node_modules.exists() {
+        let _ = fs::remove_dir_all(&ctx.node_modules);
+    }
+    Ok(())
 }
 
 fn manual_recovery_message(layer_node_modules: &Path, project_node_modules: &Path) -> String {
@@ -1436,6 +1525,7 @@ fn finish_adopt_after_move(
     ctx: &RimContext,
     project_node_modules: &Path,
     manager: &str,
+    adopt_method: &str,
 ) -> Result<(), String> {
     if env::var_os("RIM_TEST_FAIL_ADOPT_SYMLINK").is_some() {
         return Err("cannot create node_modules symlink: simulated failure".to_owned());
@@ -1444,7 +1534,7 @@ fn finish_adopt_after_move(
     if env::var_os("RIM_TEST_FAIL_ADOPT_META").is_some() {
         return Err("cannot write rim metadata: simulated failure".to_owned());
     }
-    write_adopt_meta(ctx, manager)
+    write_adopt_meta(ctx, manager, adopt_method)
 }
 
 fn rollback_adopt_move(ctx: &RimContext, project_node_modules: &Path) -> Result<(), String> {
@@ -1469,7 +1559,13 @@ fn rollback_adopt_move(ctx: &RimContext, project_node_modules: &Path) -> Result<
     move_dir_cross_device(&ctx.node_modules, project_node_modules)
 }
 
-fn print_adopt_plan(ctx: &RimContext, candidate: &ScanCandidate, dry_run: bool, diff_backup: bool) {
+fn print_adopt_plan(
+    ctx: &RimContext,
+    candidate: &ScanCandidate,
+    dry_run: bool,
+    diff_backup: bool,
+    copy_mode: bool,
+) {
     println!("project: {}", candidate.project_root.display());
     println!("node_modules: {}", candidate.node_modules.display());
     println!("rim_dir: {}", ctx.rim_dir.display());
@@ -1481,6 +1577,9 @@ fn print_adopt_plan(ctx: &RimContext, candidate: &ScanCandidate, dry_run: bool, 
     }
     if diff_backup {
         println!("diff_backup: enabled");
+    }
+    if copy_mode {
+        println!("copy: enabled");
     }
     for warning in &candidate.warnings {
         eprintln!("rim: warning: {warning}");
@@ -1498,10 +1597,10 @@ fn print_adopt_plan(ctx: &RimContext, candidate: &ScanCandidate, dry_run: bool, 
     );
 }
 
-fn write_adopt_meta(ctx: &RimContext, manager: &str) -> Result<(), String> {
+fn write_adopt_meta(ctx: &RimContext, manager: &str, adopt_method: &str) -> Result<(), String> {
     let now = now_unix();
     let contents = format!(
-        "{{\n  \"schema_version\": 1,\n  \"project_root\": \"{}\",\n  \"created_at\": {},\n  \"last_used_at\": {},\n  \"manager\": \"{}\",\n  \"mode\": \"{}\",\n  \"rim_version\": \"{}\",\n  \"manifest_hash\": \"{}\",\n  \"pinned\": false,\n  \"adopted\": true,\n  \"adopted_at\": {},\n  \"adopt_method\": \"move-existing-node_modules\"\n}}\n",
+        "{{\n  \"schema_version\": 1,\n  \"project_root\": \"{}\",\n  \"created_at\": {},\n  \"last_used_at\": {},\n  \"manager\": \"{}\",\n  \"mode\": \"{}\",\n  \"rim_version\": \"{}\",\n  \"manifest_hash\": \"{}\",\n  \"pinned\": false,\n  \"adopted\": true,\n  \"adopted_at\": {},\n  \"adopt_method\": \"{}\"\n}}\n",
         json_escape(&ctx.project_root.to_string_lossy()),
         now,
         now,
@@ -1509,7 +1608,8 @@ fn write_adopt_meta(ctx: &RimContext, manager: &str) -> Result<(), String> {
         json_escape(&rim_mode(ctx)),
         json_escape(env!("CARGO_PKG_VERSION")),
         manifest_hash(ctx),
-        now
+        now,
+        json_escape(adopt_method)
     );
     fs::write(ctx.rim_dir.join(".rim-meta.json.tmp"), contents)
         .map_err(|e| format!("cannot write rim metadata: {e}"))?;

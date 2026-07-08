@@ -150,6 +150,7 @@ rim scan --json ~/code
 rim adopt ~/code/tiny-hono --dry-run
 rim adopt ~/code/tiny-hono
 rim adopt ~/code/tiny-hono --diff-backup
+rim adopt ~/code/tiny-hono --copy
 ```
 
 Manage diff backups created by `--diff-backup`:
@@ -363,7 +364,7 @@ $env:RIM_PROFILE = "cache"; rim install
 $env:RIM_PROFILE = "external"; $env:RIM_EXTERNAL_BASE = "E:\rim"; rim install
 ```
 
-`RIM_PROFILE=ram` is not available on native Windows. For `/dev/shm` tmpfs behavior, use WSL. For a Windows RAM disk, set `RIM_BASE` manually to that RAM-disk path.
+`RIM_PROFILE=ram` is not available on native Windows. For `/dev/shm` tmpfs behavior, use WSL. For a Windows RAM disk, set `RIM_BASE` manually to that RAM-disk path, for example `set RIM_BASE=R:\rim` in `cmd` or `$env:RIM_BASE = "R:\rim"` in PowerShell.
 
 Native Windows `node_modules` links use directory symlinks. Creating them may require Developer Mode, `SeCreateSymbolicLinkPrivilege`, or running the terminal as Administrator. If symlink creation fails, try one of:
 
@@ -417,7 +418,10 @@ Prefer one of these before adopting anything you cannot regenerate:
 RIM_PROFILE=cache rim adopt ~/code/app
 RIM_PROFILE=external rim adopt ~/code/app
 rim adopt ~/code/app --diff-backup
+rim adopt ~/code/app --copy
 ```
+
+`rim adopt --copy` is useful when you still want the dependency layer in RAM, but do not want to lose the original hand-edited `node_modules`. It copies `node_modules` into the rim layer, moves the original directory to `.rim-backups/node_modules-original-<timestamp>/`, then creates the project symlink. This temporarily uses roughly 2x `node_modules` space.
 
 `rim adopt --diff-backup` creates a scratch fresh install from the same manifest/lockfile, compares it against the existing `node_modules`, and stores only the delta under `.rim-backups/`:
 
@@ -703,8 +707,10 @@ Current suite:
 - `rim adopt` rolls back the move if symlink/metadata creation fails, or prints manual recovery paths
 - high-risk adopt is refused unless `--allow-risk` is passed
 - `rim adopt --diff-backup` saves changed/added/binary deltas under `.rim-backups`
+- `rim adopt --copy` copies dependencies into the layer and preserves the original under `.rim-backups/node_modules-original-*`
 - `rim adopt --diff-backup` and `rim scan --diff` clean scratch dirs on success and failure
 - `rim adopt --diff-backup --dry-run` creates no scratch dirs, backups, or project changes
+- `rim adopt --copy --dry-run` creates no backups, layer files, or symlinks
 - `rim backup list/show/restore` manages delta backups
 - `.rim-backups/` and `.rim-active` are ignored by git
 - backup restore dry-runs without writing and restores changed/added/binary files by default
@@ -742,7 +748,7 @@ Current suite:
 
 - Linux-first, with experimental native Windows support. `/dev/shm` is the Linux/WSL default because the main target is small Linux boxes and disposable dependency state.
 - RAM/tmpfs is finite; large Playwright/Next/Expo/Electron installs can still blow up `/dev/shm`.
-- Do not store hand-edited `node_modules` only in tmpfs. If `RIM_BASE` is `/dev/shm/rim`, adopted dependencies disappear on reboot; use `--diff-backup`, `RIM_PROFILE=cache`, or `RIM_PROFILE=external`.
+- Do not store hand-edited `node_modules` only in tmpfs. If `RIM_BASE` is `/dev/shm/rim`, adopted dependencies disappear on reboot; use `--diff-backup`, `--copy`, `RIM_PROFILE=cache`, or `RIM_PROFILE=external`.
 - Active-lock protection is best-effort and based on `/proc/<pid>` on Linux; PID reuse is theoretically possible.
 - `--force` overrides active-lock protection. Use it only for confirmed stale locks or emergency cleanup.
 - Keeping the repo public is fine for rim itself, but never publish `.rim-backups/` unless you have reviewed the dependency diffs inside.
