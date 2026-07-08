@@ -2910,3 +2910,88 @@ fn gc_max_size_include_pinned_allows_budget_to_delete_pinned() {
         "include-pinned should allow deleting pinned layer"
     );
 }
+
+#[test]
+fn gc_keep_free_dry_run_selects_layers_when_free_space_target_is_huge() {
+    let driver = make_project();
+    let live_project = make_project();
+    let base = unique_temp("base");
+    let old = create_gc_layer(&base, "old-free", &live_project, 10, false, 4096);
+    let pinned = create_gc_layer(&base, "pinned-free", &live_project, 20, true, 4096);
+
+    let out = Command::new(bin())
+        .args(["gc", "--dry-run", "--keep-free", "999t"])
+        .env("RIM_BASE", &base)
+        .current_dir(&driver)
+        .output()
+        .expect("gc keep-free dry-run");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("keep-free"), "stdout: {stdout}");
+    assert!(stdout.contains("would remove"), "stdout: {stdout}");
+    assert!(
+        stdout.contains(&old.display().to_string()),
+        "stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains(&pinned.display().to_string()),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("still below keep-free"), "stdout: {stdout}");
+    assert!(old.exists(), "dry-run should keep layer");
+    assert!(pinned.exists(), "dry-run should keep pinned layer");
+}
+
+#[test]
+fn gc_keep_free_removes_eligible_layers_and_rejects_combined_budget_modes() {
+    let driver = make_project();
+    let live_project = make_project();
+    let base = unique_temp("base");
+    let old = create_gc_layer(&base, "old-free-apply", &live_project, 10, false, 4096);
+
+    let out = Command::new(bin())
+        .args(["gc", "--keep-free", "999t"])
+        .env("RIM_BASE", &base)
+        .current_dir(&driver)
+        .output()
+        .expect("gc keep-free apply");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("removed 1 layer"), "stdout: {stdout}");
+    assert!(!old.exists(), "eligible layer should be removed");
+
+    let err = Command::new(bin())
+        .args(["gc", "--max-size", "1g", "--keep-free", "1g"])
+        .env("RIM_BASE", &base)
+        .current_dir(&driver)
+        .output()
+        .expect("gc combined budget modes");
+    assert!(!err.status.success());
+    let stderr = String::from_utf8_lossy(&err.stderr);
+    assert!(
+        stderr.contains("use either --max-size or --keep-free"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn gc_keep_free_one_byte_is_noop_on_normal_filesystem() {
+    let driver = make_project();
+    let live_project = make_project();
+    let base = unique_temp("base");
+    let layer = create_gc_layer(&base, "free-noop", &live_project, 10, false, 4096);
+
+    let out = Command::new(bin())
+        .args(["gc", "--keep-free", "1b"])
+        .env("RIM_BASE", &base)
+        .current_dir(&driver)
+        .output()
+        .expect("gc keep-free noop");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("already has enough free space"),
+        "stdout: {stdout}"
+    );
+    assert!(layer.exists(), "noop should keep layer");
+}

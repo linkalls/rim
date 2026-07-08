@@ -137,6 +137,8 @@ rim gc --dry-run --older-than 1d
 rim gc --older-than 1d
 rim gc --dry-run --max-size 2g
 rim gc --max-size 2g
+rim gc --dry-run --keep-free 1g
+rim gc --keep-free 1g
 rim gc --dry-run --all
 rim gc --dry-run --all --include-pinned
 rim gc --all --force            # override active-lock protection
@@ -144,7 +146,7 @@ rim gc --all --force            # override active-lock protection
 
 `rim gc` with no selector is safe by default: it behaves like `rim gc --dry-run --orphaned`.
 
-`rim gc --max-size <size>` keeps the whole `RIM_BASE` under a budget by removing the oldest eligible layers first. It still protects pinned layers, active layers, and the current project layer unless you explicitly opt into more aggressive cleanup with flags such as `--include-pinned` or `--force`.
+`rim gc --max-size <size>` keeps the whole `RIM_BASE` under a budget by removing the oldest eligible layers first. `rim gc --keep-free <size>` instead protects free space on the filesystem backing `RIM_BASE`, which is useful for tmpfs. Both modes protect pinned layers, active layers, and the current project layer unless you explicitly opt into more aggressive cleanup with flags such as `--include-pinned` or `--force`.
 
 Find unmanaged `node_modules` directories and adopt one safely:
 
@@ -512,6 +514,8 @@ rim gc --dry-run --older-than 1d
 rim gc --older-than 1d
 rim gc --dry-run --max-size 2g
 rim gc --max-size 2g
+rim gc --dry-run --keep-free 1g
+rim gc --keep-free 1g
 rim gc --dry-run --all
 rim gc --dry-run --all --include-pinned
 rim gc --all --force            # override active-lock protection
@@ -626,21 +630,21 @@ Measurement: tree walk using lstat, so symlink targets are not counted as projec
 
 | Case | Dependencies | Normal persistent | rim persistent | rim RAM | RAM vs normal | RAM overhead | Saved persistent | Time normal | Time rim |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| npm/tiny-validation | `is-number`, `zod` | 7.6 MB | 5.2 KB | 4.8 MB | 63.53% | -2.8 MB | 99.93% | 1.197s | 1.329s |
-| npm/utility-client | `axios`, `dayjs`, `lodash` | 9.8 MB | 14.9 KB | 6.3 MB | 64.07% | -3.5 MB | 99.85% | 2.255s | 2.429s |
-| npm/hono-api | `@hono/node-server`, `hono`, `zod` | 16.9 MB | 5.6 KB | 7.1 MB | 41.80% | -9.9 MB | 99.97% | 1.833s | 1.952s |
-| npm/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 198.6 MB | 32.8 KB | 63.8 MB | 32.12% | -134.8 MB | 99.98% | 10.085s | 8.819s |
-| npm/next-app | `next`, `react`, `react-dom`, `typescript` | 549.7 MB | 34.0 KB | 324.6 MB | 59.06% | -225.0 MB | 99.99% | 14.546s | 14.669s |
-| bun/tiny-validation | `is-number`, `zod` | 7.4 MB | 4.7 KB | 3.5 MB | 46.50% | -4.0 MB | 99.94% | 0.263s | 0.218s |
-| bun/utility-client | `axios`, `dayjs`, `lodash` | 11.0 MB | 9.4 KB | 4.9 MB | 44.16% | -6.1 MB | 99.92% | 0.545s | 0.330s |
-| bun/hono-api | `@hono/node-server`, `hono`, `zod` | 13.7 MB | 5.0 KB | 5.7 MB | 41.42% | -8.0 MB | 99.96% | 0.277s | 0.241s |
-| bun/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 199.7 MB | 17.0 KB | 90.3 MB | 45.22% | -109.4 MB | 99.99% | 1.684s | 1.627s |
-| bun/next-app | `next`, `react`, `react-dom`, `typescript` | 953.4 MB | 17.5 KB | 463.9 MB | 48.65% | -489.5 MB | 100.00% | 6.906s | 6.969s |
-| deno/tiny-validation | `is-number`, `zod` | 4.8 MB | 4.6 KB | 4.6 MB | 94.59% | -266.7 KB | 99.91% | 0.601s | 0.780s |
-| deno/utility-client | `axios`, `dayjs`, `lodash` | 5.9 MB | 9.2 KB | 5.2 MB | 88.05% | -727.2 KB | 99.85% | 0.617s | 0.529s |
-| deno/hono-api | `@hono/node-server`, `hono`, `zod` | 10.9 MB | 4.9 KB | 9.8 MB | 89.93% | -1.1 MB | 99.96% | 0.724s | 0.574s |
-| deno/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 108.0 MB | 16.3 KB | 107.3 MB | 99.36% | -708.9 KB | 99.99% | 3.858s | 4.072s |
-| deno/next-app | `next`, `react`, `react-dom`, `typescript` | 498.4 MB | 17.1 KB | 494.7 MB | 99.26% | -3.7 MB | 100.00% | 8.927s | 8.672s |
+| npm/tiny-validation | `is-number`, `zod` | 7.6 MB | 5.2 KB | 4.8 MB | 63.53% | -2.8 MB | 99.93% | 1.224s | 1.399s |
+| npm/utility-client | `axios`, `dayjs`, `lodash` | 9.8 MB | 14.9 KB | 6.3 MB | 64.07% | -3.5 MB | 99.85% | 2.391s | 2.352s |
+| npm/hono-api | `@hono/node-server`, `hono`, `zod` | 16.9 MB | 5.6 KB | 7.1 MB | 41.80% | -9.9 MB | 99.97% | 1.745s | 1.935s |
+| npm/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 198.6 MB | 32.8 KB | 63.8 MB | 32.12% | -134.8 MB | 99.98% | 8.942s | 9.797s |
+| npm/next-app | `next`, `react`, `react-dom`, `typescript` | 549.7 MB | 34.0 KB | 324.6 MB | 59.06% | -225.0 MB | 99.99% | 14.866s | 14.897s |
+| bun/tiny-validation | `is-number`, `zod` | 7.4 MB | 4.7 KB | 3.5 MB | 46.50% | -4.0 MB | 99.94% | 0.244s | 0.332s |
+| bun/utility-client | `axios`, `dayjs`, `lodash` | 11.0 MB | 9.4 KB | 4.9 MB | 44.16% | -6.1 MB | 99.92% | 0.348s | 0.292s |
+| bun/hono-api | `@hono/node-server`, `hono`, `zod` | 13.7 MB | 5.0 KB | 5.7 MB | 41.42% | -8.0 MB | 99.96% | 0.309s | 0.282s |
+| bun/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 199.7 MB | 17.0 KB | 90.3 MB | 45.22% | -109.4 MB | 99.99% | 1.416s | 1.752s |
+| bun/next-app | `next`, `react`, `react-dom`, `typescript` | 953.4 MB | 17.5 KB | 463.9 MB | 48.65% | -489.5 MB | 100.00% | 7.049s | 5.808s |
+| deno/tiny-validation | `is-number`, `zod` | 4.8 MB | 4.6 KB | 4.6 MB | 94.59% | -266.7 KB | 99.91% | 0.623s | 1.237s |
+| deno/utility-client | `axios`, `dayjs`, `lodash` | 5.9 MB | 9.2 KB | 5.2 MB | 88.05% | -727.2 KB | 99.85% | 0.570s | 0.491s |
+| deno/hono-api | `@hono/node-server`, `hono`, `zod` | 10.9 MB | 4.9 KB | 9.8 MB | 89.93% | -1.1 MB | 99.96% | 0.674s | 0.553s |
+| deno/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 108.0 MB | 16.3 KB | 107.3 MB | 99.36% | -708.9 KB | 99.99% | 3.960s | 3.994s |
+| deno/next-app | `next`, `react`, `react-dom`, `typescript` | 498.4 MB | 17.1 KB | 494.7 MB | 99.26% | -3.7 MB | 100.00% | 9.303s | 9.291s |
 
 Latest benchmark summary output:
 
@@ -745,7 +749,7 @@ Current suite:
 ## Caveats
 
 - Linux-first and WSL-friendly. Native Windows builds are compile-only and intentionally refuse to run. `/dev/shm` is the Linux/WSL default because the main target is small Linux boxes and disposable dependency state.
-- RAM/tmpfs is finite; large Playwright/Next/Expo/Electron installs can still blow up `/dev/shm`.
+- RAM/tmpfs is finite; large Playwright/Next/Expo/Electron installs can still blow up `/dev/shm`; use `rim gc --keep-free 1g` to preserve a free-space floor.
 - Do not store hand-edited `node_modules` only in tmpfs. If `RIM_BASE` is `/dev/shm/rim`, adopted dependencies disappear on reboot; use `--diff-backup`, `--copy`, `RIM_PROFILE=cache`, or `RIM_PROFILE=external`.
 - Active-lock protection is best-effort and based on `/proc/<pid>` on Linux/WSL; PID reuse is theoretically possible.
 - `--force` overrides active-lock protection. Use it only for confirmed stale locks or emergency cleanup.

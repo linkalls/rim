@@ -192,7 +192,7 @@ Usage:
   rim pin|unpin
   rim manager
   rim ls
-  rim gc [--dry-run] [--orphaned] [--older-than 1d] [--max-size 2g] [--all] [--include-pinned] [--force]
+  rim gc [--dry-run] [--orphaned] [--older-than 1d] [--max-size 2g] [--keep-free 1g] [--all] [--include-pinned] [--force]
   rim path [--node-modules|--cache|--npm-cache|--bun-cache|--deno-cache|--tmp|--shadow]
   rim install|run|test|start|add|remove|update|ci [args...]  # auto-detect manager
   rim explain <bun|npm|deno|...> [args...]
@@ -597,6 +597,7 @@ struct GcOptions {
     include_pinned: bool,
     force: bool,
     max_size_bytes: Option<u64>,
+    keep_free_bytes: Option<u64>,
 }
 
 fn write_meta(ctx: &RimContext, manager: &str, update_manifest_hash: bool) -> Result<(), String> {
@@ -717,14 +718,21 @@ fn gc(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
         && !options.orphaned
         && options.older_than_seconds.is_none()
         && options.max_size_bytes.is_none()
+        && options.keep_free_bytes.is_none()
     {
         options.dry_run = true;
         options.orphaned = true;
         println!("rim gc: defaulting to --dry-run --orphaned");
     }
 
+    if options.max_size_bytes.is_some() && options.keep_free_bytes.is_some() {
+        return Err("use either --max-size or --keep-free, not both".to_owned());
+    }
     if options.max_size_bytes.is_some() {
         return gc_max_size(ctx, &options);
+    }
+    if options.keep_free_bytes.is_some() {
+        return gc_keep_free(ctx, &options);
     }
 
     let now = now_unix();
@@ -793,6 +801,13 @@ fn parse_gc_options(args: &[OsString]) -> Result<GcOptions, String> {
                     return Err("--max-size requires a value like 512m, 2g, or 100mb".to_owned());
                 };
                 options.max_size_bytes = Some(parse_size_bytes(value)?);
+            }
+            "--keep-free" => {
+                i += 1;
+                let Some(value) = args.get(i).and_then(|arg| arg.to_str()) else {
+                    return Err("--keep-free requires a value like 512m, 2g, or 100mb".to_owned());
+                };
+                options.keep_free_bytes = Some(parse_size_bytes(value)?);
             }
             _ => return Err(format!("unknown gc option: {arg}")),
         }
@@ -920,6 +935,80 @@ fn gc_max_size(ctx: &RimContext, options: &GcOptions) -> Result<u8, String> {
         println!(
             "rim gc: still above max-size by {}; pinned, active, current, or filtered layers may be protecting data",
             format_bytes(projected.saturating_sub(max_size))
+        );
+    }
+    Ok(0)
+}
+
+fn gc_keep_free(ctx: &RimContext, options: &GcOptions) -> Result<u8, String> {
+    let keep_free = options.keep_free_bytes.unwrap_or(0);
+    let Some(info) = storage_info_for(&ctx.rim_base) else {
+        return Err(format!(
+            "cannot determine available space for {}",
+            ctx.rim_base.display()
+        ));
+    };
+    println!(
+        "rim gc: keep-free {}, available {}",
+        format_bytes(keep_free),
+        format_bytes(info.available_bytes)
+    );
+    if info.available_bytes >= keep_free {
+        println!("rim gc: already has enough free space");
+        return Ok(0);
+    }
+
+    let now = now_unix();
+    let mut projected_available = info.available_bytes;
+    let mut matched = 0_u64;
+    let mut bytes = 0_u64;
+    for layer in collect_layers(ctx) {
+        if projected_available >= keep_free {
+            break;
+        }
+        if !gc_budget_candidate(&layer, options, now) {
+            continue;
+        }
+        if layer.rim_dir == ctx.rim_dir && !options.force {
+            println!("skipping current layer: {}", layer.rim_dir.display());
+            continue;
+        }
+        if !options.force && layer.active.is_active() {
+            println!("skipping active layer: {}", layer.rim_dir.display());
+            continue;
+        }
+        matched += 1;
+        bytes = bytes.saturating_add(layer.size_bytes);
+        projected_available = projected_available.saturating_add(layer.size_bytes);
+        if options.dry_run {
+            println!(
+                "would remove {}  {}",
+                format_bytes(layer.size_bytes),
+                layer.rim_dir.display()
+            );
+        } else {
+            println!(
+                "removing {}  {}",
+                format_bytes(layer.size_bytes),
+                layer.rim_dir.display()
+            );
+            remove_layer(ctx, &layer.rim_dir)?;
+        }
+    }
+    let action = if options.dry_run {
+        "would remove"
+    } else {
+        "removed"
+    };
+    println!(
+        "rim gc: {action} {matched} layer(s), {}; projected available {}",
+        format_bytes(bytes),
+        format_bytes(projected_available)
+    );
+    if projected_available < keep_free {
+        println!(
+            "rim gc: still below keep-free by {}; pinned, active, current, or filtered layers may be protecting data",
+            format_bytes(keep_free.saturating_sub(projected_available))
         );
     }
     Ok(0)
