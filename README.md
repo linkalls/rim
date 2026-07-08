@@ -259,23 +259,25 @@ The useful number is persistent disk left behind by the project.
 Run the default benchmark suite with:
 
 ```bash
-python3 scripts/bench_npm.py
+python3 scripts/bench.py
 ```
 
 Reproduce the checked-in results, including the heavier Next.js case, with:
 
 ```bash
-python3 scripts/bench_npm.py --include-heavy
+python3 scripts/bench.py --include-heavy
 ```
 
-All cases use:
+Install benchmarks use lifecycle-script-disabling flags where supported:
 
-```bash
-npm install --ignore-scripts --no-audit --no-fund
+```txt
+npm:  npm install --ignore-scripts --no-audit --no-fund
+pnpm: pnpm install --ignore-scripts
+bun:  bun install --ignore-scripts
+deno: deno cache main.ts
 ```
 
-`--ignore-scripts` is intentional: the benchmark measures dependency placement,
-not lifecycle downloads such as browser binaries or native build hooks.
+Lifecycle scripts are disabled where supported: the benchmark measures dependency/cache placement, not postinstall downloads such as browser binaries or native build hooks. Deno is measured as cache placement because it has no `node_modules` install step by default.
 
 Environment for the latest checked-in run:
 
@@ -283,42 +285,65 @@ Environment for the latest checked-in run:
 OS: Linux
 Node: v22.22.0
 npm: 10.9.4
+pnpm: 11.10.0
+bun: 1.3.14
+deno: deno 2.9.1 (stable, release, x86_64-unknown-linux-gnu)
 rim: target/release/rim
 Measurement: tree walk using lstat, so symlink targets are not counted as project disk usage
 ```
 
-| Package set | Dependencies | Normal persistent | rim persistent | rim RAM | RAM vs normal | RAM overhead | Saved persistent | Time normal | Time rim |
+| Case | Dependencies | Normal persistent | rim persistent | rim RAM | RAM vs normal | RAM overhead | Saved persistent | Time normal | Time rim |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| tiny-validation | `is-number`, `zod` | 7.6 MB | 5.2 KB | 8.8 MB | 115.82% | +1.2 MB | 99.93% | 1.217s | 1.415s |
-| utility-client | `axios`, `dayjs`, `lodash` | 9.8 MB | 14.9 KB | 10.0 MB | 101.86% | +186.2 KB | 99.85% | 2.322s | 2.445s |
-| hono-api | `@hono/node-server`, `hono`, `zod` | 16.9 MB | 5.6 KB | 17.3 MB | 102.05% | +355.1 KB | 99.97% | 1.766s | 1.913s |
-| react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 198.6 MB | 32.8 KB | 198.4 MB | 99.90% | -208.0 KB | 99.98% | 8.553s | 9.013s |
-| next-app | `next`, `react`, `react-dom`, `typescript` | 549.7 MB | 34.0 KB | 546.6 MB | 99.45% | -3.0 MB | 99.99% | 14.766s | 14.621s |
+| npm/tiny-validation | `is-number`, `zod` | 7.6 MB | 5.2 KB | 8.8 MB | 115.81% | +1.2 MB | 99.93% | 1.401s | 1.395s |
+| npm/utility-client | `axios`, `dayjs`, `lodash` | 9.8 MB | 14.9 KB | 10.0 MB | 101.85% | +185.8 KB | 99.85% | 2.252s | 2.423s |
+| npm/hono-api | `@hono/node-server`, `hono`, `zod` | 16.9 MB | 5.6 KB | 17.3 MB | 102.05% | +354.8 KB | 99.97% | 1.736s | 1.890s |
+| npm/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 198.6 MB | 32.8 KB | 198.4 MB | 99.90% | -208.3 KB | 99.98% | 9.071s | 9.062s |
+| npm/next-app | `next`, `react`, `react-dom`, `typescript` | 549.7 MB | 34.0 KB | 546.6 MB | 99.45% | -3.0 MB | 99.99% | 14.561s | 15.096s |
+| pnpm/tiny-validation | `is-number`, `zod` | 8.1 MB | 4.9 KB | 28.1 MB | 346.31% | +20.0 MB | 99.94% | 1.666s | 2.659s |
+| pnpm/utility-client | `axios`, `dayjs`, `lodash` | 11.7 MB | 10.6 KB | 31.3 MB | 267.36% | +19.6 MB | 99.91% | 1.949s | 2.833s |
+| pnpm/hono-api | `@hono/node-server`, `hono`, `zod` | 13.5 MB | 5.2 KB | 33.4 MB | 247.49% | +19.9 MB | 99.96% | 1.660s | 2.722s |
+| pnpm/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 135.8 MB | 21.2 KB | 203.7 MB | 150.00% | +67.9 MB | 99.98% | 3.291s | 5.095s |
+| pnpm/next-app | `next`, `react`, `react-dom`, `typescript` | 652.8 MB | 21.7 KB | 779.1 MB | 119.35% | +126.3 MB | 100.00% | 9.611s | 10.023s |
+| bun/tiny-validation | `is-number`, `zod` | 7.4 MB | 4.7 KB | 7.2 MB | 97.25% | -208.8 KB | 99.94% | 0.291s | 0.199s |
+| bun/utility-client | `axios`, `dayjs`, `lodash` | 11.0 MB | 9.4 KB | 10.0 MB | 90.76% | -1.0 MB | 99.92% | 0.383s | 0.363s |
+| bun/hono-api | `@hono/node-server`, `hono`, `zod` | 13.7 MB | 5.0 KB | 11.8 MB | 86.39% | -1.9 MB | 99.96% | 0.282s | 0.327s |
+| bun/react-vite-ts | `@vitejs/plugin-react`, `react`, `react-dom`, `typescript`, `vite` | 199.7 MB | 17.0 KB | 199.0 MB | 99.65% | -725.2 KB | 99.99% | 1.640s | 1.640s |
+| bun/next-app | `next`, `react`, `react-dom`, `typescript` | 953.4 MB | 17.5 KB | 946.7 MB | 99.29% | -6.7 MB | 100.00% | 6.906s | 5.916s |
+| deno/deno-zod-cache | `zod` | 4.8 MB | 4.4 KB | 4.5 MB | 94.73% | -258.8 KB | 99.91% | 0.481s | 0.584s |
 
 Latest benchmark summary output:
 
 ```txt
-tiny-validation: persistent 7.6 MB -> 5.2 KB, rim RAM 8.8 MB (115.82% of normal, overhead +1.2 MB), saved 99.93%
-utility-client: persistent 9.8 MB -> 14.9 KB, rim RAM 10.0 MB (101.86% of normal, overhead +186.2 KB), saved 99.85%
-hono-api: persistent 16.9 MB -> 5.6 KB, rim RAM 17.3 MB (102.05% of normal, overhead +355.1 KB), saved 99.97%
-react-vite-ts: persistent 198.6 MB -> 32.8 KB, rim RAM 198.4 MB (99.90% of normal, overhead -208.0 KB), saved 99.98%
-next-app: persistent 549.7 MB -> 34.0 KB, rim RAM 546.6 MB (99.45% of normal, overhead -3.0 MB), saved 99.99%
+npm/tiny-validation: persistent 7.6 MB -> 5.2 KB, rim RAM 8.8 MB (115.81% of normal, overhead +1.2 MB), saved 99.93%
+npm/utility-client: persistent 9.8 MB -> 14.9 KB, rim RAM 10.0 MB (101.85% of normal, overhead +185.8 KB), saved 99.85%
+npm/hono-api: persistent 16.9 MB -> 5.6 KB, rim RAM 17.3 MB (102.05% of normal, overhead +354.8 KB), saved 99.97%
+npm/react-vite-ts: persistent 198.6 MB -> 32.8 KB, rim RAM 198.4 MB (99.90% of normal, overhead -208.3 KB), saved 99.98%
+npm/next-app: persistent 549.7 MB -> 34.0 KB, rim RAM 546.6 MB (99.45% of normal, overhead -3.0 MB), saved 99.99%
+pnpm/tiny-validation: persistent 8.1 MB -> 4.9 KB, rim RAM 28.1 MB (346.31% of normal, overhead +20.0 MB), saved 99.94%
+pnpm/utility-client: persistent 11.7 MB -> 10.6 KB, rim RAM 31.3 MB (267.36% of normal, overhead +19.6 MB), saved 99.91%
+pnpm/hono-api: persistent 13.5 MB -> 5.2 KB, rim RAM 33.4 MB (247.49% of normal, overhead +19.9 MB), saved 99.96%
+pnpm/react-vite-ts: persistent 135.8 MB -> 21.2 KB, rim RAM 203.7 MB (150.00% of normal, overhead +67.9 MB), saved 99.98%
+pnpm/next-app: persistent 652.8 MB -> 21.7 KB, rim RAM 779.1 MB (119.35% of normal, overhead +126.3 MB), saved 100.00%
+bun/tiny-validation: persistent 7.4 MB -> 4.7 KB, rim RAM 7.2 MB (97.25% of normal, overhead -208.8 KB), saved 99.94%
+bun/utility-client: persistent 11.0 MB -> 9.4 KB, rim RAM 10.0 MB (90.76% of normal, overhead -1.0 MB), saved 99.92%
+bun/hono-api: persistent 13.7 MB -> 5.0 KB, rim RAM 11.8 MB (86.39% of normal, overhead -1.9 MB), saved 99.96%
+bun/react-vite-ts: persistent 199.7 MB -> 17.0 KB, rim RAM 199.0 MB (99.65% of normal, overhead -725.2 KB), saved 99.99%
+bun/next-app: persistent 953.4 MB -> 17.5 KB, rim RAM 946.7 MB (99.29% of normal, overhead -6.7 MB), saved 100.00%
+deno/deno-zod-cache: persistent 4.8 MB -> 4.4 KB, rim RAM 4.5 MB (94.73% of normal, overhead -258.8 KB), saved 99.91%
 ```
 
 Takeaway:
 
-- Persistent project/cache footprint drops by about 99.85-99.99% in these runs.
-- RAM usage is not magic: for tiny installs it can be larger than normal
-  persistent usage because `rim` keeps a shadow project plus RAM caches.
-- For larger app stacks, the RAM layer is roughly the dependency mass that
-  would otherwise live on disk; sometimes it is slightly smaller because npm's
-  normal project+cache layout has its own duplication.
+- Persistent project/cache footprint drops by about 99.85-100.00% in these runs.
+- RAM usage is not magic: npm tiny installs can be larger than normal persistent usage, and pnpm has a noticeable RAM store overhead in this setup.
+- Bun and Deno are especially clean in this run: their tiny/cache cases use slightly less RAM than the normal persistent footprint.
+- For larger app stacks, the RAM layer is roughly the dependency mass that would otherwise live on disk; exact overhead depends on the package manager cache/store model.
 - Rebooting, `rim clean`, `--auto-clean`, `--ephemeral`, or deleting `RIM_BASE`
   removes the dependency layer.
 
-Full machine-readable results are in `bench-results.json`.
+Full machine-readable results are in `bench-results.json`. `scripts/bench.py` is the main benchmark entrypoint; `scripts/bench_npm.py` remains as a compatibility wrapper for the old npm-only entrypoint.
 
-Use `--include-heavy` only when `/dev/shm` has enough free space.
+Use `--include-heavy` only when `/dev/shm` has enough free space. Use `--managers npm,pnpm,bun,deno` to choose which tools to measure.
 
 ## Tests
 
