@@ -192,7 +192,7 @@ Usage:
   rim pin|unpin
   rim manager
   rim ls
-  rim gc [--dry-run] [--orphaned] [--older-than 1d] [--all] [--include-pinned] [--force]
+  rim gc [--dry-run] [--orphaned] [--older-than 1d] [--max-size 2g] [--all] [--include-pinned] [--force]
   rim path [--node-modules|--cache|--npm-cache|--bun-cache|--deno-cache|--tmp|--shadow]
   rim install|run|test|start|add|remove|update|ci [args...]  # auto-detect manager
   rim explain <bun|npm|deno|...> [args...]
@@ -596,6 +596,7 @@ struct GcOptions {
     older_than_seconds: Option<u64>,
     include_pinned: bool,
     force: bool,
+    max_size_bytes: Option<u64>,
 }
 
 fn write_meta(ctx: &RimContext, manager: &str, update_manifest_hash: bool) -> Result<(), String> {
@@ -712,10 +713,18 @@ fn list_layers(ctx: &RimContext) {
 
 fn gc(ctx: &RimContext, args: &[OsString]) -> Result<u8, String> {
     let mut options = parse_gc_options(args)?;
-    if !options.all && !options.orphaned && options.older_than_seconds.is_none() {
+    if !options.all
+        && !options.orphaned
+        && options.older_than_seconds.is_none()
+        && options.max_size_bytes.is_none()
+    {
         options.dry_run = true;
         options.orphaned = true;
         println!("rim gc: defaulting to --dry-run --orphaned");
+    }
+
+    if options.max_size_bytes.is_some() {
+        return gc_max_size(ctx, &options);
     }
 
     let now = now_unix();
@@ -778,6 +787,13 @@ fn parse_gc_options(args: &[OsString]) -> Result<GcOptions, String> {
                 };
                 options.older_than_seconds = Some(parse_duration_seconds(value)?);
             }
+            "--max-size" => {
+                i += 1;
+                let Some(value) = args.get(i).and_then(|arg| arg.to_str()) else {
+                    return Err("--max-size requires a value like 512m, 2g, or 100mb".to_owned());
+                };
+                options.max_size_bytes = Some(parse_size_bytes(value)?);
+            }
             _ => return Err(format!("unknown gc option: {arg}")),
         }
         i += 1;
@@ -803,6 +819,136 @@ fn parse_duration_seconds(value: &str) -> Result<u64, String> {
             "unsupported duration unit in {value}; use s, m, h, or d"
         )),
     }
+}
+
+fn parse_size_bytes(value: &str) -> Result<u64, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("invalid size: empty".to_owned());
+    }
+    let number_len = trimmed
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .map(char::len_utf8)
+        .sum::<usize>();
+    if number_len == 0 {
+        return Err(format!("invalid size: {value}"));
+    }
+    let amount = trimmed[..number_len]
+        .parse::<u64>()
+        .map_err(|_| format!("invalid size: {value}"))?;
+    let unit = trimmed[number_len..].trim().to_ascii_lowercase();
+    let multiplier = match unit.as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024_u64.saturating_pow(2),
+        "g" | "gb" | "gib" => 1024_u64.saturating_pow(3),
+        "t" | "tb" | "tib" => 1024_u64.saturating_pow(4),
+        _ => {
+            return Err(format!(
+                "unsupported size unit in {value}; use b, k, m, g, or t"
+            ));
+        }
+    };
+    Ok(amount.saturating_mul(multiplier))
+}
+
+fn gc_max_size(ctx: &RimContext, options: &GcOptions) -> Result<u8, String> {
+    let max_size = options.max_size_bytes.unwrap_or(0);
+    let now = now_unix();
+    let layers = collect_layers(ctx);
+    let total_before = layers
+        .iter()
+        .fold(0_u64, |sum, layer| sum.saturating_add(layer.size_bytes));
+    println!(
+        "rim gc: max-size {}, current {}",
+        format_bytes(max_size),
+        format_bytes(total_before)
+    );
+    if total_before <= max_size {
+        println!("rim gc: already within max-size budget");
+        return Ok(0);
+    }
+
+    let mut projected = total_before;
+    let mut matched = 0_u64;
+    let mut bytes = 0_u64;
+    for layer in layers {
+        if projected <= max_size {
+            break;
+        }
+        if !gc_budget_candidate(&layer, options, now) {
+            continue;
+        }
+        if layer.rim_dir == ctx.rim_dir && !options.force {
+            println!("skipping current layer: {}", layer.rim_dir.display());
+            continue;
+        }
+        if !options.force && layer.active.is_active() {
+            println!("skipping active layer: {}", layer.rim_dir.display());
+            continue;
+        }
+        matched += 1;
+        bytes = bytes.saturating_add(layer.size_bytes);
+        projected = projected.saturating_sub(layer.size_bytes);
+        if options.dry_run {
+            println!(
+                "would remove {}  {}",
+                format_bytes(layer.size_bytes),
+                layer.rim_dir.display()
+            );
+        } else {
+            println!(
+                "removing {}  {}",
+                format_bytes(layer.size_bytes),
+                layer.rim_dir.display()
+            );
+            remove_layer(ctx, &layer.rim_dir)?;
+        }
+    }
+    let action = if options.dry_run {
+        "would remove"
+    } else {
+        "removed"
+    };
+    println!(
+        "rim gc: {action} {matched} layer(s), {}; projected total {}",
+        format_bytes(bytes),
+        format_bytes(projected)
+    );
+    if projected > max_size {
+        println!(
+            "rim gc: still above max-size by {}; pinned, active, current, or filtered layers may be protecting data",
+            format_bytes(projected.saturating_sub(max_size))
+        );
+    }
+    Ok(0)
+}
+
+fn gc_budget_candidate(layer: &LayerInfo, options: &GcOptions, now: u64) -> bool {
+    if !options.include_pinned && layer.meta.as_ref().is_some_and(|meta| meta.pinned) {
+        return false;
+    }
+    if options.all || (!options.orphaned && options.older_than_seconds.is_none()) {
+        return true;
+    }
+    if options.orphaned
+        && layer
+            .meta
+            .as_ref()
+            .is_some_and(|meta| !Path::new(&meta.project_root).exists())
+    {
+        return true;
+    }
+    if let Some(older_than) = options.older_than_seconds
+        && layer
+            .meta
+            .as_ref()
+            .is_some_and(|meta| now.saturating_sub(meta.last_used_at) >= older_than)
+    {
+        return true;
+    }
+    false
 }
 
 fn gc_matches(layer: &LayerInfo, options: &GcOptions, now: u64) -> bool {

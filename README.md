@@ -135,12 +135,16 @@ rim gc --dry-run --orphaned
 rim gc --orphaned
 rim gc --dry-run --older-than 1d
 rim gc --older-than 1d
+rim gc --dry-run --max-size 2g
+rim gc --max-size 2g
 rim gc --dry-run --all
 rim gc --dry-run --all --include-pinned
 rim gc --all --force            # override active-lock protection
 ```
 
 `rim gc` with no selector is safe by default: it behaves like `rim gc --dry-run --orphaned`.
+
+`rim gc --max-size <size>` keeps the whole `RIM_BASE` under a budget by removing the oldest eligible layers first. It still protects pinned layers, active layers, and the current project layer unless you explicitly opt into more aggressive cleanup with flags such as `--include-pinned` or `--force`.
 
 Find unmanaged `node_modules` directories and adopt one safely:
 
@@ -506,6 +510,8 @@ rim gc --dry-run --orphaned   # show layers whose source project no longer exist
 rim gc --orphaned             # remove orphaned layers
 rim gc --dry-run --older-than 1d
 rim gc --older-than 1d
+rim gc --dry-run --max-size 2g
+rim gc --max-size 2g
 rim gc --dry-run --all
 rim gc --dry-run --all --include-pinned
 rim gc --all --force            # override active-lock protection

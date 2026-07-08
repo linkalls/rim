@@ -2803,3 +2803,110 @@ fn doctor_suggest_reports_broken_rim_link() {
     );
     assert!(stdout.contains("rim ensure"), "stdout: {stdout}");
 }
+
+fn create_gc_layer(
+    base: &Path,
+    name: &str,
+    project_root: &Path,
+    last_used_at: u64,
+    pinned: bool,
+    payload_bytes: usize,
+) -> PathBuf {
+    let layer = base.join(name);
+    fs::create_dir_all(layer.join("project/node_modules/pkg")).expect("layer dirs");
+    fs::write(
+        layer.join("project/node_modules/pkg/blob"),
+        vec![b'x'; payload_bytes],
+    )
+    .expect("payload");
+    fs::write(
+        layer.join(".rim-meta.json"),
+        format!(
+            "{{\n  \"schema_version\": 1,\n  \"project_root\": \"{}\",\n  \"created_at\": 1,\n  \"last_used_at\": {},\n  \"manager\": \"bun\",\n  \"mode\": \"tmpfs\",\n  \"rim_version\": \"test\",\n  \"manifest_hash\": \"hash\",\n  \"pinned\": {}\n}}\n",
+            project_root.display(),
+            last_used_at,
+            pinned
+        ),
+    )
+    .expect("meta");
+    layer
+}
+
+#[test]
+fn gc_max_size_dry_run_selects_oldest_layer_without_deleting() {
+    let driver = make_project();
+    let live_project = make_project();
+    let base = unique_temp("base");
+    let old = create_gc_layer(&base, "old", &live_project, 10, false, 4096);
+    let new = create_gc_layer(&base, "new", &live_project, 20, false, 512);
+
+    let out = Command::new(bin())
+        .args(["gc", "--dry-run", "--max-size", "18k"])
+        .env("RIM_BASE", &base)
+        .current_dir(&driver)
+        .output()
+        .expect("gc max-size dry-run");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("max-size 18.0 KB"), "stdout: {stdout}");
+    assert!(stdout.contains("would remove"), "stdout: {stdout}");
+    assert!(
+        stdout.contains(&old.display().to_string()),
+        "stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains(&new.display().to_string()),
+        "stdout: {stdout}"
+    );
+    assert!(old.exists(), "dry-run should keep old layer");
+    assert!(new.exists(), "dry-run should keep new layer");
+}
+
+#[test]
+fn gc_max_size_removes_layers_until_budget_and_respects_pinned() {
+    let driver = make_project();
+    let live_project = make_project();
+    let base = unique_temp("base");
+    let old = create_gc_layer(&base, "old", &live_project, 10, false, 4096);
+    let middle = create_gc_layer(&base, "middle", &live_project, 20, false, 4096);
+    let pinned = create_gc_layer(&base, "pinned", &live_project, 30, true, 4096);
+
+    let out = Command::new(bin())
+        .args(["gc", "--max-size", "2k"])
+        .env("RIM_BASE", &base)
+        .current_dir(&driver)
+        .output()
+        .expect("gc max-size apply");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("removed 2 layer"), "stdout: {stdout}");
+    assert!(stdout.contains("still above max-size"), "stdout: {stdout}");
+    assert!(!old.exists(), "oldest unpinned layer should be removed");
+    assert!(!middle.exists(), "next unpinned layer should be removed");
+    assert!(
+        pinned.exists(),
+        "pinned layer should survive without --include-pinned"
+    );
+}
+
+#[test]
+fn gc_max_size_include_pinned_allows_budget_to_delete_pinned() {
+    let driver = make_project();
+    let live_project = make_project();
+    let base = unique_temp("base");
+    let pinned = create_gc_layer(&base, "pinned", &live_project, 10, true, 4096);
+
+    let out = Command::new(bin())
+        .args(["gc", "--max-size", "1b", "--include-pinned"])
+        .env("RIM_BASE", &base)
+        .current_dir(&driver)
+        .output()
+        .expect("gc max-size include pinned");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("removed 1 layer"), "stdout: {stdout}");
+    assert!(
+        !pinned.exists(),
+        "include-pinned should allow deleting pinned layer"
+    );
+}
