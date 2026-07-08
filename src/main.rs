@@ -1,6 +1,8 @@
+use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::os::unix::fs::symlink;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -79,7 +81,7 @@ fn run() -> Result<u8, String> {
         "prepare" => {
             ensure_layout(&ctx)?;
             sync_manifests_to_shadow(&ctx)?;
-            write_meta(&ctx, "prepare")?;
+            write_meta(&ctx, "prepare", true)?;
             print_context(&ctx);
             Ok(0)
         }
@@ -91,6 +93,9 @@ fn run() -> Result<u8, String> {
             let ensure_args = args.split_off(1);
             ensure_command(&ctx, &ensure_args, options)
         }
+        "pin" => pin_command(&ctx, true),
+        "unpin" => pin_command(&ctx, false),
+        "manager" => manager_command(&ctx),
         "ls" => {
             list_layers(&ctx);
             Ok(0)
@@ -161,8 +166,10 @@ Usage:
   rim doctor [--suggest]
   rim clean [--cache-only|--deps-only]
   rim ensure [bun|npm|pnpm]
+  rim pin|unpin
+  rim manager
   rim ls
-  rim gc [--dry-run] [--orphaned] [--older-than 1d] [--all]
+  rim gc [--dry-run] [--orphaned] [--older-than 1d] [--all] [--include-pinned]
   rim path [--node-modules|--cache|--npm-cache|--bun-cache|--deno-cache|--tmp|--shadow]
   rim install|run|test|start|add|remove|update|ci [args...]  # auto-detect manager
   rim explain <bun|npm|deno|...> [args...]
@@ -470,6 +477,8 @@ struct RimMeta {
     manager: String,
     mode: String,
     rim_version: String,
+    manifest_hash: Option<String>,
+    pinned: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -485,20 +494,45 @@ struct GcOptions {
     all: bool,
     orphaned: bool,
     older_than_seconds: Option<u64>,
+    include_pinned: bool,
 }
 
-fn write_meta(ctx: &RimContext, manager: &str) -> Result<(), String> {
+fn write_meta(ctx: &RimContext, manager: &str, update_manifest_hash: bool) -> Result<(), String> {
+    write_meta_with_pin(ctx, manager, update_manifest_hash, None)
+}
+
+fn write_meta_with_pin(
+    ctx: &RimContext,
+    manager: &str,
+    update_manifest_hash: bool,
+    pinned_override: Option<bool>,
+) -> Result<(), String> {
     let now = now_unix();
     let existing = read_meta(&ctx.rim_dir);
     let created_at = existing.as_ref().map_or(now, |meta| meta.created_at);
+    let pinned =
+        pinned_override.unwrap_or_else(|| existing.as_ref().is_some_and(|meta| meta.pinned));
+    let manifest_hash = if update_manifest_hash {
+        Some(manifest_hash(ctx))
+    } else {
+        existing
+            .as_ref()
+            .and_then(|meta| meta.manifest_hash.clone())
+    };
+    let manifest_hash_json = manifest_hash
+        .as_ref()
+        .map(|hash| format!("\"{}\"", json_escape(hash)))
+        .unwrap_or_else(|| "null".to_owned());
     let contents = format!(
-        "{{\n  \"project_root\": \"{}\",\n  \"created_at\": {},\n  \"last_used_at\": {},\n  \"manager\": \"{}\",\n  \"mode\": \"{}\",\n  \"rim_version\": \"{}\"\n}}\n",
+        "{{\n  \"schema_version\": 1,\n  \"project_root\": \"{}\",\n  \"created_at\": {},\n  \"last_used_at\": {},\n  \"manager\": \"{}\",\n  \"mode\": \"{}\",\n  \"rim_version\": \"{}\",\n  \"manifest_hash\": {},\n  \"pinned\": {}\n}}\n",
         json_escape(&ctx.project_root.to_string_lossy()),
         created_at,
         now,
         json_escape(manager),
         json_escape(&rim_mode(ctx)),
-        json_escape(env!("CARGO_PKG_VERSION"))
+        json_escape(env!("CARGO_PKG_VERSION")),
+        manifest_hash_json,
+        pinned
     );
     let meta_path = ctx.rim_dir.join(".rim-meta.json");
     let tmp_path = ctx.rim_dir.join(".rim-meta.json.tmp");
@@ -516,14 +550,16 @@ fn read_meta(rim_dir: &Path) -> Option<RimMeta> {
         mode: json_string_field(&contents, "mode").unwrap_or_else(|| "unknown".to_owned()),
         rim_version: json_string_field(&contents, "rim_version")
             .unwrap_or_else(|| "unknown".to_owned()),
+        manifest_hash: json_string_field(&contents, "manifest_hash"),
+        pinned: json_bool_field(&contents, "pinned").unwrap_or(false),
     })
 }
 
 fn list_layers(ctx: &RimContext) {
     let layers = collect_layers(ctx);
     println!(
-        "{:<36} {:<10} {:<8} {:>10} {:>8} {:>10} {:<8}  LAYER",
-        "PROJECT", "MANAGER", "MODE", "SIZE", "AGE", "LAST_USED", "VERSION"
+        "{:<36} {:<10} {:<8} {:>10} {:>8} {:>10} {:<6} {:<8}  LAYER",
+        "PROJECT", "MANAGER", "MODE", "SIZE", "AGE", "LAST_USED", "PIN", "VERSION"
     );
     for layer in layers {
         let project = layer
@@ -557,8 +593,13 @@ fn list_layers(ctx: &RimContext) {
             .as_ref()
             .map(|meta| meta.rim_version.as_str())
             .unwrap_or("unknown");
+        let pin = if layer.meta.as_ref().is_some_and(|meta| meta.pinned) {
+            "yes"
+        } else {
+            "no"
+        };
         println!(
-            "{project:<36} {manager:<10} {mode:<8} {:>10} {:>8} {:>10} {version:<8}  {}",
+            "{project:<36} {manager:<10} {mode:<8} {:>10} {:>8} {:>10} {pin:<6} {version:<8}  {}",
             format_bytes(layer.size_bytes),
             age,
             last_used,
@@ -622,6 +663,7 @@ fn parse_gc_options(args: &[OsString]) -> Result<GcOptions, String> {
             "--dry-run" => options.dry_run = true,
             "--all" => options.all = true,
             "--orphaned" => options.orphaned = true,
+            "--include-pinned" => options.include_pinned = true,
             "--older-than" => {
                 i += 1;
                 let Some(value) = args.get(i).and_then(|arg| arg.to_str()) else {
@@ -657,6 +699,9 @@ fn parse_duration_seconds(value: &str) -> Result<u64, String> {
 }
 
 fn gc_matches(layer: &LayerInfo, options: &GcOptions, now: u64) -> bool {
+    if !options.include_pinned && layer.meta.as_ref().is_some_and(|meta| meta.pinned) {
+        return false;
+    }
     if options.all {
         return true;
     }
@@ -757,6 +802,19 @@ fn json_u64_field(contents: &str, key: &str) -> Option<u64> {
     digits.parse::<u64>().ok()
 }
 
+fn json_bool_field(contents: &str, key: &str) -> Option<bool> {
+    let needle = format!("\"{key}\"");
+    let rest = contents.split_once(&needle)?.1;
+    let rest = rest.split_once(':')?.1.trim_start();
+    if rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn shorten_project(project: &str) -> String {
     if let Some(home) = env::var_os("HOME") {
         let home = home.to_string_lossy();
@@ -796,6 +854,28 @@ struct MemoryInfo {
     shmem_bytes: Option<u64>,
 }
 
+fn pin_command(ctx: &RimContext, pinned: bool) -> Result<u8, String> {
+    fs::create_dir_all(&ctx.rim_dir)
+        .map_err(|e| format!("cannot create {}: {e}", ctx.rim_dir.display()))?;
+    let manager = read_meta(&ctx.rim_dir)
+        .map(|meta| meta.manager)
+        .unwrap_or_else(|| detect_manager(ctx).unwrap_or("unknown").to_owned());
+    write_meta_with_pin(ctx, &manager, false, Some(pinned))?;
+    println!(
+        "{}: {}",
+        if pinned { "pinned" } else { "unpinned" },
+        ctx.rim_dir.display()
+    );
+    Ok(0)
+}
+
+fn manager_command(ctx: &RimContext) -> Result<u8, String> {
+    let detection = detect_manager_with_reason(ctx)?;
+    println!("detected: {}", detection.manager);
+    println!("reason: {}", detection.reason);
+    Ok(0)
+}
+
 fn ensure_command(ctx: &RimContext, args: &[OsString], options: CliOptions) -> Result<u8, String> {
     let tool = match args.first().and_then(|arg| arg.to_str()) {
         None => detect_manager(ctx)?,
@@ -807,12 +887,13 @@ fn ensure_command(ctx: &RimContext, args: &[OsString], options: CliOptions) -> R
         }
     };
     ensure_layout_for(ctx, tool)?;
-    write_meta(ctx, tool)?;
-    if dependencies_missing(ctx) {
-        println!("rim ensure: dependencies missing; running {tool} install");
+    let reason = dependency_install_reason(ctx);
+    write_meta(ctx, tool, false)?;
+    if let Some(reason) = reason {
+        println!("rim ensure: {reason}; running {tool} install");
         run_install_like(ctx, tool, options)
     } else {
-        println!("rim ensure: dependencies already present for {tool}");
+        println!("rim ensure: dependencies already present and manifest hash matches for {tool}");
         Ok(0)
     }
 }
@@ -1278,31 +1359,73 @@ fn is_manager_shortcut(command: &str) -> bool {
     )
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ManagerDetection {
+    manager: &'static str,
+    reason: &'static str,
+}
+
 fn detect_manager(ctx: &RimContext) -> Result<&'static str, String> {
+    Ok(detect_manager_with_reason(ctx)?.manager)
+}
+
+fn detect_manager_with_reason(ctx: &RimContext) -> Result<ManagerDetection, String> {
     let package_json =
         fs::read_to_string(ctx.project_root.join("package.json")).unwrap_or_default();
-    if ctx.project_root.join("bun.lock").exists()
-        || ctx.project_root.join("bun.lockb").exists()
-        || package_json.contains("\"packageManager\":") && package_json.contains("bun@")
-    {
-        return Ok("bun");
+    if let Some(package_manager) = json_string_field(&package_json, "packageManager") {
+        if package_manager.starts_with("bun@") {
+            return Ok(ManagerDetection {
+                manager: "bun",
+                reason: "packageManager bun@...",
+            });
+        }
+        if package_manager.starts_with("npm@") {
+            return Ok(ManagerDetection {
+                manager: "npm",
+                reason: "packageManager npm@...",
+            });
+        }
+        if package_manager.starts_with("pnpm@") {
+            eprintln!("rim: warning: auto-detected pnpm, which is experimental in rim.");
+            return Ok(ManagerDetection {
+                manager: "pnpm",
+                reason: "packageManager pnpm@...",
+            });
+        }
     }
-    if ctx.project_root.join("package-lock.json").exists()
-        || package_json.contains("\"packageManager\":") && package_json.contains("npm@")
-    {
-        return Ok("npm");
+    if ctx.project_root.join("bun.lock").exists() {
+        return Ok(ManagerDetection {
+            manager: "bun",
+            reason: "bun.lock found",
+        });
     }
-    if ctx.project_root.join("pnpm-lock.yaml").exists()
-        || package_json.contains("\"packageManager\":") && package_json.contains("pnpm@")
-    {
+    if ctx.project_root.join("bun.lockb").exists() {
+        return Ok(ManagerDetection {
+            manager: "bun",
+            reason: "bun.lockb found",
+        });
+    }
+    if ctx.project_root.join("package-lock.json").exists() {
+        return Ok(ManagerDetection {
+            manager: "npm",
+            reason: "package-lock.json found",
+        });
+    }
+    if ctx.project_root.join("pnpm-lock.yaml").exists() {
         eprintln!("rim: warning: auto-detected pnpm, which is experimental in rim.");
-        return Ok("pnpm");
+        return Ok(ManagerDetection {
+            manager: "pnpm",
+            reason: "pnpm-lock.yaml found",
+        });
     }
     if ctx.project_root.join("deno.json").exists() || ctx.project_root.join("deno.jsonc").exists() {
         return Err("manager auto-detection found Deno, but rim install/run shortcuts target package managers. Use `rim deno ...` directly.".to_owned());
     }
     if ctx.project_root.join("package.json").exists() {
-        return Ok("bun");
+        return Ok(ManagerDetection {
+            manager: "bun",
+            reason: "package.json only defaults to bun",
+        });
     }
     Err(
         "cannot auto-detect package manager; use `rim bun ...`, `rim npm ...`, or `rim deno ...`"
@@ -1335,12 +1458,13 @@ fn run_tool(
     }
 
     ensure_layout_for(ctx, tool)?;
-    write_meta(ctx, tool)?;
+    let install_reason = dependency_install_reason(ctx);
+    write_meta(ctx, tool, false)?;
 
     let needs_ephemeral_install = options.ephemeral
         && !install_like
         && should_ephemeral_install(tool, &args)
-        && (options.dry_run || dependencies_missing(ctx));
+        && (options.dry_run || install_reason.is_some());
 
     if needs_ephemeral_install {
         let install_code = run_install_like(ctx, tool, options)?;
@@ -1355,7 +1479,7 @@ fn run_tool(
     let needs_shortcut_ensure = options.ensure_before_run
         && !install_like
         && should_ephemeral_install(tool, &args)
-        && (options.dry_run || dependencies_missing(ctx));
+        && (options.dry_run || install_reason.is_some());
     if needs_shortcut_ensure && !options.dry_run {
         let install_code = run_install_like(ctx, tool, options)?;
         if install_code != 0 {
@@ -1399,6 +1523,7 @@ fn run_tool(
     if install_like && exit_code == 0 {
         sync_mutated_manifests_back(ctx)?;
         trim_install_cache(ctx, tool, options);
+        write_meta(ctx, tool, true)?;
     }
 
     if options.should_clean_after(exit_code) {
@@ -1421,6 +1546,7 @@ fn run_install_like(ctx: &RimContext, tool: &str, options: CliOptions) -> Result
     if code == 0 {
         sync_mutated_manifests_back(ctx)?;
         trim_install_cache(ctx, tool, options);
+        write_meta(ctx, tool, true)?;
     }
     Ok(code)
 }
@@ -1500,6 +1626,21 @@ fn should_ephemeral_install(tool: &str, args: &[OsString]) -> bool {
     matches!(first, "run" | "test" | "start")
 }
 
+fn dependency_install_reason(ctx: &RimContext) -> Option<String> {
+    if dependencies_missing(ctx) {
+        return Some("dependencies missing".to_owned());
+    }
+    let Some(meta) = read_meta(&ctx.rim_dir) else {
+        return Some("manifest metadata missing".to_owned());
+    };
+    let current = manifest_hash(ctx);
+    match meta.manifest_hash {
+        Some(stored) if stored == current => None,
+        Some(_) => Some("manifest hash changed".to_owned()),
+        None => Some("manifest hash missing".to_owned()),
+    }
+}
+
 fn dependencies_missing(ctx: &RimContext) -> bool {
     if !ctx.node_modules.exists() {
         return true;
@@ -1513,6 +1654,19 @@ fn dependencies_missing(ctx: &RimContext) -> bool {
         }
     }
     true
+}
+
+fn manifest_hash(ctx: &RimContext) -> String {
+    let mut hasher = DefaultHasher::new();
+    for name in manifest_names() {
+        name.hash(&mut hasher);
+        let path = ctx.project_root.join(name);
+        match fs::read(&path) {
+            Ok(bytes) => bytes.hash(&mut hasher),
+            Err(_) => 0_u8.hash(&mut hasher),
+        }
+    }
+    format!("{:016x}", hasher.finish())
 }
 
 fn print_env(ctx: &RimContext) {

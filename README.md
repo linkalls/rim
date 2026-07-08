@@ -22,6 +22,8 @@ Implemented:
 - `rim doctor --suggest`
 - `rim ls`
 - `rim gc`
+- `rim pin` / `rim unpin`
+- `rim manager`
 - `rim path`
 - `rim explain`
 - manager shortcuts: `rim install`, `rim run dev`, `rim test`
@@ -39,7 +41,7 @@ Implemented:
 - install-like commands run in a shadow project so npm cannot replace the project symlink with a real directory
 - generated lockfiles are copied back to the real project after successful install-like commands
 - Deno commands skip the project `node_modules` symlink and only redirect cache/env paths
-- `.rim-meta.json` is written into each dependency layer for `rim ls` / `rim gc`
+- `.rim-meta.json` is written into each dependency layer for `rim ls` / `rim gc`, with manifest hash and pinned state
 - `bunfig.toml` is copied into the shadow project for Bun installs
 
 No external Rust dependencies are used.
@@ -81,14 +83,15 @@ rim run dev
 rim test
 ```
 
-Detection order is Bun first, then npm, then pnpm as experimental. If only `package.json` exists, `rim` defaults to Bun.
+Detection order gives `packageManager` first priority, then Bun lockfiles, then npm lockfiles, then pnpm as experimental. If only `package.json` exists, `rim` defaults to Bun.
 
-`rim run`, `rim test`, and `rim start` also ensure dependencies first when the dependency layer is missing:
+`rim run`, `rim test`, and `rim start` also ensure dependencies first when the dependency layer is missing or stale:
 
 ```bash
-rim run dev   # auto-detect manager, install if missing, then run dev
-rim ensure    # install if missing, otherwise do nothing
+rim run dev   # auto-detect manager, install if missing/stale, then run dev
+rim ensure    # install if missing/stale, otherwise do nothing
 rim ensure bun
+rim manager   # show detected manager and why
 ```
 
 For Deno, `rim` mainly redirects caches and does not create a project `node_modules` symlink:
@@ -124,6 +127,7 @@ rim gc --orphaned
 rim gc --dry-run --older-than 1d
 rim gc --older-than 1d
 rim gc --dry-run --all
+rim gc --dry-run --all --include-pinned
 ```
 
 `rim gc` with no selector is safe by default: it behaves like `rim gc --dry-run --orphaned`.
@@ -240,7 +244,7 @@ The real project gets:
 node_modules -> /dev/shm/rim/app-<hash>/project/node_modules
 ```
 
-Each layer also gets `.rim-meta.json` so `rim ls` and `rim gc` can reverse-map a dependency layer back to its source project, manager, mode, created time, and last-used time. Metadata writes are atomic: `rim` writes a temporary file and renames it into place.
+Each layer also gets `.rim-meta.json` so `rim ls` and `rim gc` can reverse-map a dependency layer back to its source project, manager, mode, created time, last-used time, manifest hash, and pinned state. Metadata writes are atomic: `rim` writes a temporary file and renames it into place.
 
 Deno commands are special: `rim deno ...` creates only the dependency-layer metadata/cache root and does not create a `node_modules` symlink in the project.
 
@@ -248,7 +252,7 @@ For install-like commands (`install`, `i`, `add`, `remove`, `rm`, `update`, `up`
 
 For non-install commands (`run dev`, `test`, etc.), `rim` runs from the real project so relative source paths behave normally.
 
-`rim ensure` is the reusable dependency check: it prepares the layer, installs when `node_modules` is missing or empty, and otherwise exits without running the package manager. Shortcut commands (`rim run`, `rim test`, `rim start`) use the same check before running.
+`rim ensure` is the reusable dependency check: it prepares the layer, installs when `node_modules` is missing/empty or when the manifest hash changed, and otherwise exits without running the package manager. Shortcut commands (`rim run`, `rim test`, `rim start`) use the same hash-aware check before running.
 
 ## Environment
 
@@ -304,12 +308,19 @@ After successful npm/bun install-like commands, `rim` trims the package-manager 
 `rim ls` shows every dependency layer under the active `RIM_BASE`:
 
 ```txt
-PROJECT                              MANAGER    MODE           SIZE      AGE  LAST_USED VERSION   LAYER
-~/code/tiny-hono                     bun        tmpfs       18.3 MB      12m        1m 0.1.0     /dev/shm/rim/tiny-hono-a1b2c3d4
-~/code/test-vite                     npm        tmpfs       92.1 MB       2h        1h 0.1.0     /dev/shm/rim/test-vite-b5c6d7e8
+PROJECT                              MANAGER    MODE           SIZE      AGE  LAST_USED PIN    VERSION   LAYER
+~/code/tiny-hono                     bun        tmpfs       18.3 MB      12m        1m no     0.1.0     /dev/shm/rim/tiny-hono-a1b2c3d4
+~/code/test-vite                     npm        tmpfs       92.1 MB       2h        1h yes    0.1.0     /dev/shm/rim/test-vite-b5c6d7e8
 ```
 
-`rim gc` removes dependency layers by metadata:
+`rim pin` protects the current layer from garbage collection. `rim unpin` removes that protection.
+
+```bash
+rim pin
+rim unpin
+```
+
+`rim gc` removes dependency layers by metadata. Pinned layers are skipped unless `--include-pinned` is passed:
 
 ```bash
 rim gc --dry-run --orphaned   # show layers whose source project no longer exists
@@ -317,6 +328,7 @@ rim gc --orphaned             # remove orphaned layers
 rim gc --dry-run --older-than 1d
 rim gc --older-than 1d
 rim gc --dry-run --all
+rim gc --dry-run --all --include-pinned
 ```
 
 With no selector, `rim gc` is intentionally safe and only previews orphaned layers.
@@ -498,11 +510,15 @@ Current suite:
 - install-like commands warn when `RIM_BASE` is low on space
 - install-like commands with `--auto-clean` warn that dependencies will be removed while manifest changes remain
 - `.rim-meta.json` powers `rim ls` and metadata-based `rim gc`
+- `.rim-meta.json` stores manifest hash and pinned state
+- `rim pin` / `rim unpin` toggle GC protection
 - `rim gc --dry-run --orphaned` previews orphaned layer cleanup
 - `rim gc --orphaned` removes orphaned layers
+- pinned layers are skipped by GC unless `--include-pinned` is used
 - `rim path` prints script-friendly dependency-layer paths
+- `rim manager` reports detected manager and reason
 - `rim install` / `rim run dev` auto-detect Bun or npm from project files
-- `rim ensure` installs missing dependencies and skips when dependencies already exist
+- `rim ensure` installs missing/stale dependencies and skips when dependencies already exist and manifest hash matches
 - shortcut `rim run` / `rim test` / `rim start` ensure dependencies before running
 - `RIM_PROFILE=cache` maps to `$HOME/.cache/rim` when `RIM_BASE` is unset
 - Deno commands do not create a project `node_modules` symlink
@@ -523,7 +539,7 @@ Current suite:
 - Restarting clears `/dev/shm`; run `rim npm install` again to recreate dependencies.
 - For long-lived or heavy projects on tiny machines, consider `RIM_BASE=$HOME/.cache/rim` or an external drive.
 - `--ephemeral` auto-installs only for package-manager `run`, `test`, and `start` commands for now.
-- Manager shortcuts are intentionally simple: Bun lock/packageManager wins first, then npm, then pnpm experimental.
+- Manager shortcuts are intentionally simple: packageManager wins first, then Bun lockfiles, then npm, then pnpm experimental.
 - pnpm is not recommended for RAM/tmpfs mode; use npm or bun for the main path, or move `RIM_BASE` to cache/external storage if experimenting with pnpm.
 - Some package-manager edge cases are not handled yet, especially workspaces and lifecycle scripts that assume install cwd is the real source tree.
 - This is intentionally not a global package manager replacement. It is a small wrapper for ephemeral or isolated dependencies.

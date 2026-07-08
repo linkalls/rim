@@ -43,6 +43,9 @@ fn help_lists_cleanup_options() {
         "rim path",
         "rim explain",
         "rim ensure",
+        "rim pin|unpin",
+        "rim manager",
+        "--include-pinned",
         "install|run|test|start",
         "RIM_PROFILE",
         "--tmp",
@@ -124,6 +127,8 @@ fn prepare_writes_metadata_and_ls_reports_layer() {
     let meta = fs::read_to_string(rim_dir.join(".rim-meta.json")).expect("rim metadata");
     assert!(meta.contains("\"project_root\""), "meta: {meta}");
     assert!(meta.contains("\"manager\": \"prepare\""), "meta: {meta}");
+    assert!(meta.contains("\"manifest_hash\""), "meta: {meta}");
+    assert!(meta.contains("\"pinned\": false"), "meta: {meta}");
     assert!(
         meta.contains(&project.to_string_lossy().to_string()),
         "meta should contain project path: {meta}"
@@ -518,6 +523,199 @@ fn explain_auto_detects_shortcut_command() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("tool: bun"), "stdout: {stdout}");
     assert!(stdout.contains("args: install"), "stdout: {stdout}");
+}
+
+#[test]
+fn manager_command_prefers_package_manager_field_over_lockfiles() {
+    let project = make_project();
+    let base = unique_temp("base");
+    fs::write(
+        project.join("package.json"),
+        "{\"packageManager\":\"npm@10.9.4\",\"scripts\":{\"dev\":\"node index.js\"}}\n",
+    )
+    .expect("package json");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+
+    let out = Command::new(bin())
+        .arg("manager")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("rim manager");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("detected: npm"), "stdout: {stdout}");
+    assert!(stdout.contains("packageManager npm"), "stdout: {stdout}");
+}
+
+#[test]
+fn ensure_reinstalls_when_metadata_is_missing_even_if_deps_exist() {
+    let project = make_project();
+    let base = unique_temp("base");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(prepare.status.success());
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    fs::create_dir_all(link_target.join("existing-dep")).expect("dep");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir");
+    fs::remove_file(rim_dir.join(".rim-meta.json")).expect("remove meta");
+
+    let fake_bin = unique_temp("bin");
+    let fake_bun = fake_bin.join("bun");
+    fs::write(
+        &fake_bun,
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf install >> \"$RIM_TEST_LOG\"\nmkdir -p node_modules/fake\nprintf lock > bun.lock\n",
+    )
+    .expect("fake bun");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_bun)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let log = project.join("calls.log");
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(bin())
+        .arg("ensure")
+        .env("RIM_BASE", &base)
+        .env("PATH", path)
+        .env("RIM_TEST_LOG", &log)
+        .current_dir(&project)
+        .output()
+        .expect("ensure");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("manifest metadata missing"),
+        "stdout: {stdout}"
+    );
+    assert!(fs::read_to_string(log).expect("log").contains("install"));
+}
+
+#[test]
+fn ensure_reinstalls_when_manifest_hash_changes() {
+    let project = make_project();
+    let base = unique_temp("base");
+    fs::write(project.join("bun.lock"), "").expect("bun lock");
+    let fake_bin = unique_temp("bin");
+    let fake_bun = fake_bin.join("bun");
+    fs::write(
+        &fake_bun,
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'install\n' >> \"$RIM_TEST_LOG\"\nmkdir -p node_modules/fake\nprintf lock > bun.lock\n",
+    )
+    .expect("fake bun");
+    assert!(
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_bun)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let log = project.join("calls.log");
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let first = Command::new(bin())
+        .arg("ensure")
+        .env("RIM_BASE", &base)
+        .env("PATH", &path)
+        .env("RIM_TEST_LOG", &log)
+        .current_dir(&project)
+        .output()
+        .expect("first ensure");
+    assert!(first.status.success());
+
+    fs::write(
+        project.join("package.json"),
+        "{\"scripts\":{\"dev\":\"node index.js\"},\"dependencies\":{\"zod\":\"3.25.76\"}}\n",
+    )
+    .expect("mutate package json");
+
+    let second = Command::new(bin())
+        .arg("ensure")
+        .env("RIM_BASE", &base)
+        .env("PATH", &path)
+        .env("RIM_TEST_LOG", &log)
+        .current_dir(&project)
+        .output()
+        .expect("second ensure");
+    assert!(second.status.success());
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    assert!(stdout.contains("manifest hash changed"), "stdout: {stdout}");
+    let calls = fs::read_to_string(log).expect("log");
+    assert_eq!(calls.matches("install").count(), 2, "calls: {calls}");
+}
+
+#[test]
+fn pin_protects_layer_from_gc_until_include_pinned() {
+    let project = make_project();
+    let driver = make_project();
+    let base = unique_temp("base");
+
+    let prepare = Command::new(bin())
+        .arg("prepare")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("prepare");
+    assert!(prepare.status.success());
+    let link_target = fs::read_link(project.join("node_modules")).expect("read link");
+    let rim_dir = link_target
+        .parent()
+        .and_then(Path::parent)
+        .expect("rim dir")
+        .to_path_buf();
+
+    let pin = Command::new(bin())
+        .arg("pin")
+        .env("RIM_BASE", &base)
+        .current_dir(&project)
+        .output()
+        .expect("pin");
+    assert!(pin.status.success());
+    let meta = fs::read_to_string(rim_dir.join(".rim-meta.json")).expect("meta");
+    assert!(meta.contains("\"pinned\": true"), "meta: {meta}");
+
+    let gc = Command::new(bin())
+        .args(["gc", "--all"])
+        .env("RIM_BASE", &base)
+        .current_dir(&driver)
+        .output()
+        .expect("gc all");
+    assert!(gc.status.success());
+    assert!(rim_dir.exists(), "pinned layer should survive gc --all");
+
+    let gc = Command::new(bin())
+        .args(["gc", "--all", "--include-pinned"])
+        .env("RIM_BASE", &base)
+        .current_dir(&driver)
+        .output()
+        .expect("gc include pinned");
+    assert!(gc.status.success());
+    assert!(
+        !rim_dir.exists(),
+        "--include-pinned should allow deleting pinned layer"
+    );
 }
 
 #[test]
